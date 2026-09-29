@@ -45,6 +45,24 @@ owns IRC membership or history. The sidebar and popout share the same status str
 unbounded line can be allocated. `IrcAdapter` remains the presentation translator for IRC events,
 notice filtering, and channel-list/key dialogs. It does not decide reconnect policy.
 
+## Cleanup of superseded paths
+
+The wire handler receives the immutable `IrcLine` directly. Time and batch tags are local to
+that call, rather than mutable fields on the connection. Desired channels provide the single
+registration gate for JOINs; the unused generic registration callback queue has been removed.
+The bounded normal/urgent output queues still handle actual transmission.
+
+The panel reads unread markers directly from model snapshots. `ChannelPane.showMessages()` is
+its only history update path; formatting and HTML remain derived caches. The old direct append,
+clear, and widget-rename helpers are gone. Channel close flows through the session controller
+once, while closing a private conversation only updates the model. Reload nickname retention
+remains in the session controller; the unused startup retention branch has been removed.
+
+The adapter creates its wire client during initialization, without constructing an unused
+client first. Required session-generation checks, synchronization, and cancellation remain.
+
+See [regression evidence](irc-regression-evidence.md) for the before/after comparison and limits.
+
 ## Reference lessons
 
 The local reference demonstrates intended channels versus actual membership, requested

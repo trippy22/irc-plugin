@@ -63,6 +63,12 @@ public class IrcConnectionTest {
                     assertFalse(first.isRegistered());
                     send(peer, ":server 001 Alice :Welcome");
                     assertEquals("JOIN #keep correct-key", in.readLine());
+                    send(peer, ":server 001 Alice :Duplicate welcome");
+                    // Let the normal command pacing interval pass: a duplicate JOIN must not arrive.
+                    peer.setSoTimeout(900);
+                    try { fail("unexpected command after duplicate welcome: " + in.readLine()); }
+                    catch (SocketTimeoutException expected) { }
+                    peer.setSoTimeout(3000);
                     CountDownLatch nick = new CountDownLatch(1);
                     first.addEventListener(e -> { if (e.getType() == SimpleIrcClient.IrcEvent.Type.NICK_CHANGE) nick.countDown(); });
                     send(peer, ":Alice!u@h JOIN #keep");

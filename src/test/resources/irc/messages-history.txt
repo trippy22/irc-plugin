@@ -1,0 +1,40 @@
+INPUT :server 001 Alice :Welcome
+EVENT REGISTERED | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+INPUT :bob!u@h PRIVMSG #room :hello : world
+EVENT MESSAGE | bob | #room | hello : world | <null>
+STATE Alice | Alice | true | []
+INPUT :bob!u@h PRIVMSG Alice :private
+EVENT MESSAGE | bob | bob | private | <null>
+STATE Alice | Alice | true | []
+INPUT :bob!u@h PRIVMSG #room :\x01ACTION waves\x01
+EVENT ACTION | bob | #room | waves | <null>
+STATE Alice | Alice | true | []
+INPUT :bob!u@h PRIVMSG Alice :\x01VERSION\x01
+COMMAND NOTICE bob :\x01VERSION RuneLite IRC Plugin\x01
+STATE Alice | Alice | true | []
+INPUT :bob!u@h PRIVMSG Alice :\x01PING 1234\x01
+COMMAND NOTICE bob :\x01PING 1234\x01
+STATE Alice | Alice | true | []
+INPUT :bob!u@h NOTICE Alice :notice
+EVENT NOTICE | bob | Alice | notice | <null>
+STATE Alice | Alice | true | []
+INPUT :server NOTICE Alice :server notice
+EVENT SERVER_NOTICE | server | <null> | server notice | <null>
+STATE Alice | Alice | true | []
+INPUT :server BATCH +h chathistory #room
+STATE Alice | Alice | true | []
+INPUT @batch=h;time=2026-01-01T00:00:00Z :bob!u@h PRIVMSG #room :old message
+STATE Alice | Alice | true | []
+INPUT @batch=h;time=2026-01-01T00:00:01Z :bob!u@h PRIVMSG #room :\x01ACTION waved\x01
+STATE Alice | Alice | true | []
+INPUT @batch=h :bob!u@h NOTICE #room :ignored within history
+STATE Alice | Alice | true | []
+INPUT :server BATCH -h
+EVENT HISTORY_BATCH | <null> | #room | <null> | <null>
+  HISTORY MESSAGE | bob | #room | old message | 2026-01-01T00:00:00Z
+  HISTORY ACTION | bob | #room | waved | 2026-01-01T00:00:01Z
+STATE Alice | Alice | true | []
+INPUT :bob!u@h PRIVMSG #room :live after batch
+EVENT MESSAGE | bob | #room | live after batch | <null>
+STATE Alice | Alice | true | []

@@ -26,10 +26,6 @@ final class IrcOutput implements AutoCloseable {
         return true;
     }
 
-    synchronized boolean cancel(String key) {
-        return commands.removeIf(line -> key.equals(line.key));
-    }
-
     synchronized boolean cancelMatching(java.util.function.Predicate<String> keyMatches) {
         return commands.removeIf(line -> line.key != null && keyMatches.test(line.key));
     }

@@ -1,0 +1,83 @@
+INPUT :server 001 Alice :Welcome
+EVENT REGISTERED | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+INPUT :server 332 Alice #room :topic
+EVENT TOPIC | System | #room | topic | <null>
+STATE Alice | Alice | true | []
+INPUT :server 333 Alice #room bob 123456
+EVENT TOPIC_INFO | * Topic set by | #room | bob | <null>
+STATE Alice | Alice | true | []
+INPUT :bob!u@h TOPIC #room :changed topic
+EVENT TOPIC | bob | #room | changed topic | <null>
+STATE Alice | Alice | true | []
+INPUT :server 324 Alice #room +nt
+EVENT CHANNEL_MODE | * Modes | #room | +nt | <null>
+STATE Alice | Alice | true | []
+INPUT :server 301 Alice bob :away
+EVENT WHOIS_REPLY | System | bob | bob is away: away | <null>
+STATE Alice | Alice | true | []
+INPUT :server 311 Alice bob user host * :Real Name
+EVENT WHOIS_REPLY | System | bob | bob is user@host (Real Name) | <null>
+STATE Alice | Alice | true | []
+INPUT :server 312 Alice bob irc.example :server info
+EVENT WHOIS_REPLY | System | bob | bob is connected to irc.example (server info) | <null>
+STATE Alice | Alice | true | []
+INPUT :server 313 Alice bob :operator
+EVENT WHOIS_REPLY | System | bob | bob is an IRC operator | <null>
+STATE Alice | Alice | true | []
+INPUT :server 317 Alice bob 123 456 :idle
+EVENT WHOIS_REPLY | System | bob | bob has been idle for 123 seconds | <null>
+STATE Alice | Alice | true | []
+INPUT :server 319 Alice bob :@#room +#other
+EVENT WHOIS_REPLY | System | bob | bob is on channels: @#room +#other | <null>
+STATE Alice | Alice | true | []
+INPUT :server 318 Alice bob :End of WHOIS
+EVENT WHOIS_REPLY | System | bob | End of WHOIS for bob | <null>
+STATE Alice | Alice | true | []
+INPUT :server 321 Alice Channel :Users Name
+STATE Alice | Alice | true | []
+INPUT :server 322 Alice #room 42 :topic
+STATE Alice | Alice | true | []
+INPUT :server 323 Alice :End of LIST
+EVENT CHANNEL_LIST | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 263 Alice LIST :Try again later
+EVENT CHANNEL_LIST_FAILED | <null> | <null> | Try again later | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 475 Alice #locked :Bad key
+EVENT CHANNEL_STATE | <null> | #locked | FAILED | Bad key
+EVENT BAD_CHANNEL_KEY | <null> | #locked | Bad key | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 403 Alice #missing :No such channel
+EVENT CHANNEL_STATE | <null> | #missing | FAILED | #missing No such channel
+EVENT SERVER_ERROR | <null> | <null> | Server error 403: #missing No such channel | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 471 Alice #full :Channel is full
+EVENT CHANNEL_STATE | <null> | #full | FAILED | #full Channel is full
+EVENT SERVER_ERROR | <null> | <null> | Server error 471: #full Channel is full | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 473 Alice #invite :Invite only
+EVENT CHANNEL_STATE | <null> | #invite | FAILED | #invite Invite only
+EVENT SERVER_ERROR | <null> | <null> | Server error 473: #invite Invite only | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 474 Alice #banned :Banned
+EVENT CHANNEL_STATE | <null> | #banned | FAILED | #banned Banned
+EVENT SERVER_ERROR | <null> | <null> | Server error 474: #banned Banned | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 475 Alice #malformed
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :server 311 Alice bob :malformed
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic
+INPUT :bob!u@h PRIVMSG Alice :\x01
+EVENT MESSAGE | bob | bob | \x01 | <null>
+STATE Alice | Alice | true | []
+LIST #room | 42 | topic

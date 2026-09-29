@@ -74,7 +74,6 @@ public class IrcPanel extends PluginPanel {
     private static final int CHANNEL_LIST_TIMEOUT_MS = 30000;
     private Font font;
 
-    public final Map<String, Boolean> unreadMessages = new LinkedHashMap<>();
     private static final String SYSTEM_TAB = "System";
 
     private final JComboBox<String> bufferDropdown = getBufferComboBox();
@@ -109,9 +108,9 @@ public class IrcPanel extends PluginPanel {
             String currentTab = getCurrentChannel();
             for (int i = 0; i < tabbedPane.getTabCount(); i++) {
                 String tabTitle = tabbedPane.getTitleAt(i);
-                if (!SYSTEM_TAB.equals(tabTitle) && unreadMessages.getOrDefault(tabTitle, false) && !tabTitle.equals(currentTab)) {
+                if (!SYSTEM_TAB.equals(tabTitle) && isUnread(tabTitle) && !tabTitle.equals(currentTab)) {
                     tabbedPane.setForegroundAt(i, new Color(135, 206, 250)); // Change color for different flash
-                } else if (!SYSTEM_TAB.equals(tabTitle) && !unreadMessages.getOrDefault(tabTitle, false)) {
+                } else if (!SYSTEM_TAB.equals(tabTitle) && !isUnread(tabTitle)) {
                     tabbedPane.setForegroundAt(i, Color.white);
                 }
             }
@@ -403,7 +402,7 @@ public class IrcPanel extends PluginPanel {
             public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
                 JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
 
-                if (unreadMessages.getOrDefault(value.toString(), false)) {
+                if (isUnread(value.toString())) {
                     label.setForeground(new Color(135, 206, 250)); // Change color for different flash
                 } else {
                     label.setForeground(Color.white);
@@ -484,6 +483,13 @@ public class IrcPanel extends PluginPanel {
 
     public String getCurrentChannel() { return model.snapshot().selected; }
 
+    boolean isUnread(String name) {
+        for (IrcChatModel.Conversation conversation : model.snapshot().conversations) {
+            if (model.sameName(conversation.name, name)) return conversation.unread;
+        }
+        return false;
+    }
+
     public void clearCurrentPane() { model.clear(getCurrentChannel()); }
     public boolean isPane(String name) {
         return tabbedPane.indexOfTab(name) != -1;
@@ -563,7 +569,7 @@ public class IrcPanel extends PluginPanel {
             if (detached) {
                 if (desktopLayout == null) {
                     desktopLayout = new IrcDesktopLayout(config.server().getHostname(),
-                            name -> unreadMessages.getOrDefault(name, false), this::setFocusedChannel,
+                            this::isUnread, this::setFocusedChannel,
                             nick -> {
                                 addChannel(nick);
                                 setFocusedChannel(nick);
@@ -679,9 +685,7 @@ public class IrcPanel extends PluginPanel {
                     return true;
                 });
             }
-            unreadMessages.clear();
             for (IrcChatModel.Conversation b : state.conversations) {
-                unreadMessages.put(b.name, b.unread);
                 channelPanes.get(b.name).showMessages(b.messages);
                 if (model.sameName(b.name, state.selected)) {
                     int index = tabbedPane.indexOfTab(b.name);
@@ -757,46 +761,6 @@ public class IrcPanel extends PluginPanel {
     }
 
     public void renameChannel(String oldName, String newName) { model.rename(oldName, newName); }
-    static <V> void renameKeyInPlace(Map<String, V> map, String oldKey, String newKey) {
-        if (!map.containsKey(oldKey) || map.containsKey(newKey)) {
-            return;
-        }
-        LinkedHashMap<String, V> rebuilt = new LinkedHashMap<>();
-        for (Map.Entry<String, V> entry : map.entrySet()) {
-            rebuilt.put(entry.getKey().equals(oldKey) ? newKey : entry.getKey(), entry.getValue());
-        }
-        map.clear();
-        map.putAll(rebuilt);
-    }
-
-    private void renameBufferDropdownItem(String oldName, String newName) {
-        int itemIndex = -1;
-        for (int i = 0; i < bufferDropdown.getItemCount(); i++) {
-            if (oldName.equals(bufferDropdown.getItemAt(i))) {
-                itemIndex = i;
-                break;
-            }
-        }
-        if (itemIndex == -1) {
-            return;
-        }
-        int selected = bufferDropdown.getSelectedIndex();
-        ActionListener[] listeners = bufferDropdown.getActionListeners();
-        for (ActionListener listener : listeners) {
-            bufferDropdown.removeActionListener(listener);
-        }
-        try {
-            bufferDropdown.removeItemAt(itemIndex);
-            bufferDropdown.insertItemAt(newName, itemIndex);
-            if (selected >= 0 && selected < bufferDropdown.getItemCount()) {
-                bufferDropdown.setSelectedIndex(selected);
-            }
-        } finally {
-            for (ActionListener listener : listeners) {
-                bufferDropdown.addActionListener(listener);
-            }
-        }
-    }
 
     private void promptRemoveChannel() {
         String channel = getCurrentChannel();
@@ -827,7 +791,7 @@ public class IrcPanel extends PluginPanel {
 
     public static class ChannelPane extends JTextPane {
         private final IrcConfig config;
-        private ArrayList<String> messageLog;
+        private final ArrayList<String> messageLog;
         private boolean renderPending;
         private List<IrcMessage> displayedMessages = Collections.emptyList();
         private Map<IrcMessage, String> formattedMessages = new IdentityHashMap<>();
@@ -883,15 +847,6 @@ public class IrcPanel extends PluginPanel {
                     }
                 }
             });
-        }
-
-        void appendMessage(IrcMessage message, IrcConfig config) {
-            String formattedMessage = formatPanelMessage(message, config);
-            messageLog.add(formattedMessage);
-            if (messageLog.size() > config.getMaxScrollback()) {
-                messageLog.remove(0);
-            }
-            scheduleRender();
         }
 
         private void scheduleRender() {
@@ -1161,11 +1116,6 @@ public class IrcPanel extends PluginPanel {
             } catch (NumberFormatException e) {
                 return false;
             }
-        }
-
-        public void clear() {
-            this.setText("");
-            messageLog = new ArrayList<>();
         }
 
         public void cancelPreviewManager() {

@@ -116,13 +116,10 @@ public class SimpleIrcClient {
     /** Opt-in raw protocol logging, for diagnosing a failure we cannot reproduce. */
     private volatile boolean rawLogging = false;
 
-    String currentTagTime;   // package-private: accessed by TestableIrcClient subclass
-    String currentTagBatch;  // package-private: accessed by TestableIrcClient subclass
-
     private final Map<String, List<IrcEvent>> activeBatches = new HashMap<>();
     private final Map<String, String> activeBatchChannels = new HashMap<>();
 
-    boolean capHistorySupported = false;  // package-private: accessed by TestableIrcClient subclass
+    private boolean capHistorySupported = false;
     private boolean capEndSent = false;
     private final Set<String> advertisedCaps = new HashSet<>();
 
@@ -244,7 +241,6 @@ public class SimpleIrcClient {
         if (shuttingDown) return;
         shuttingDown = true;
         registered = false;
-        pendingCommands.clear();
         output.discardCommands();
         if (reason != null && !reason.isEmpty()) recordDisconnectReason(reason);
         // QUIT is best effort. A stalled write cannot delay cancellation beyond this deadline.
@@ -400,15 +396,18 @@ public class SimpleIrcClient {
         if (rawLogging) log.info("IRC << {}", redactForLog(line));
         IrcLine decoded = IrcLine.parse(line);
         if (decoded == null) return;
-        currentTagTime = decoded.tags.get("time");
-        currentTagBatch = decoded.tags.get("batch");
         if ("PING".equals(decoded.command)) {
             sendRawLine("PONG :" + (decoded.params.isEmpty() ? "" : decoded.params.get(decoded.params.size() - 1)));
             return;
         }
-        processCommand(decoded.source, decoded.command, decoded.params);
+        processCommand(decoded);
     }
-    private void processCommand(String source, String command, List<String> params) {
+    private void processCommand(IrcLine line) {
+        String source = line.source;
+        String command = line.command;
+        List<String> params = line.params;
+        String currentTagTime = line.tags.get("time");
+        String currentTagBatch = line.tags.get("batch");
         String sourceNick = extractNick(source);
 
         // IRCv3 batch intercept: accumulate tagged messages instead of processing normally
@@ -1117,29 +1116,12 @@ public class SimpleIrcClient {
         fireEvent(new IrcEvent(IrcEvent.Type.USERS_CHANGED, null, channel, null, null));
     }
 
-    private final List<Runnable> pendingCommands = new ArrayList<>();
-
-    public synchronized void executeWhenRegistered(Runnable command) {
-        if (shuttingDown) {
-            commandError("Disconnected; reconnect before joining channels.");
-        } else if (registered) {
-            command.run();
-        } else if (pendingCommands.size() < 128) {
-            pendingCommands.add(command);
-        } else {
-            commandError("Too many pending commands; wait for registration.");
-        }
-    }
-
     private void fireEvent(IrcEvent event) {
         if (event.getType() == IrcEvent.Type.REGISTERED) {
             if (registered) return;
             registered = true;
             if (registrationDeadline != null) registrationDeadline.cancel(false);
             for (String channel : new ArrayList<>(desiredChannels.keySet())) sendJoin(channel);
-            List<Runnable> ready = new ArrayList<>(pendingCommands);
-            pendingCommands.clear();
-            for (Runnable command : ready) command.run();
         }
         for (IrcEventListener listener : listeners) {
             try { listener.onEvent(event); }
@@ -1155,7 +1137,7 @@ public class SimpleIrcClient {
         public enum Type {
             CONNECT, DISCONNECT, REGISTERED, MESSAGE, ACTION, JOIN, PART, QUIT,
             NICK_CHANGE, KICK, NOTICE, SERVER_NOTICE, CHANNEL_MODE, USER_MODE,
-            TOPIC, NAMES, NICK_IN_USE, ERROR, TOPIC_INFO, BAD_CHANNEL_KEY, WHOIS_REPLY,
+            TOPIC, NAMES, ERROR, TOPIC_INFO, BAD_CHANNEL_KEY, WHOIS_REPLY,
             HISTORY_BATCH, SASL_SUCCESS, SASL_FAILED, USERS_CHANGED,
             CHANNEL_LIST, CHANNEL_LIST_FAILED, SERVER_ERROR, CHANNEL_STATE, SERVER_SUPPORT
         }

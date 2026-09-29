@@ -40,10 +40,6 @@ public class IrcAdapter {
         this.joinRequested = joinRequested;
     }
 
-    public IrcAdapter() {
-        client = new SimpleIrcClient();
-    }
-
     /**
      * Initialize the client with the provided config
      */

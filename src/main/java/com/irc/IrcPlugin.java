@@ -119,15 +119,11 @@ public class IrcPlugin extends Plugin {
         return configManager.getConfig(IrcConfig.class);
     }
 
-    private void connectToIrc() { connectToIrc(null); }
-
-    private void connectToIrc(String retainedNick) {
+    private void connectToIrc() {
         // Seed nick only; once connected the network's confirmed nick (tracked by the
         // adapter from the raw NICK event) is the source of truth - see ircAdapter.getNick().
         String initialNick;
-        if (retainedNick != null && !retainedNick.isEmpty()) {
-            initialNick = retainedNick;
-        } else if (Strings.isNullOrEmpty(config.username())) {
+        if (Strings.isNullOrEmpty(config.username())) {
             initialNick = "RLGuest" + (int) (Math.random() * 9999 + 1);
         } else {
             initialNick = sanitizeNick(config.username());
@@ -572,7 +568,7 @@ public class IrcPlugin extends Plugin {
     private void leaveChannel(String channel, String reason) {
         if (ircAdapter == null || panel == null) return;
         if (SimpleIrcClient.isChannel(channel)) ircAdapter.leaveChannel(channel, reason);
-        panel.removeChannel(channel);
+        else panel.removeChannel(channel);
     }
     private void handleChannelJoin(String channel, String password) {
         joinChannel(channel, password);

@@ -42,20 +42,6 @@ public class IrcProtocolStateTest {
         assertNull(client.getConfirmedNick());
     }
 
-    @Test public void commandsWaitForWelcomeAndDrainExactlyOnce() {
-        AtomicInteger count = new AtomicInteger();
-        client.executeWhenRegistered(() -> {
-            count.incrementAndGet();
-            client.executeWhenRegistered(count::incrementAndGet);
-        });
-        assertEquals(0, count.get());
-        welcome();
-        welcome();
-        assertEquals(2, count.get());
-        client.executeWhenRegistered(count::incrementAndGet);
-        assertEquals(3, count.get());
-    }
-
     @Test public void desiredChannelsAndConfirmedMembershipAreIndependent() {
         client.joinChannel("#One", "old");
         client.joinChannel("#one", "corrected");
