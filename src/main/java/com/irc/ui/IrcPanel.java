@@ -39,6 +39,21 @@ import static org.apache.commons.text.StringEscapeUtils.escapeHtml4;
 
 @Slf4j
 public class IrcPanel extends PluginPanel {
+    /** Small immutable projection for the game thread; Swing remains the conversation owner. */
+    public static final class BufferSnapshot {
+        public final List<String> names;
+        public final Set<String> unread;
+        public final String selected;
+        private BufferSnapshot(List<String> names, Map<String, Boolean> unread, String selected) {
+            this.names = Collections.unmodifiableList(new ArrayList<>(names));
+            Set<String> marked = new HashSet<>();
+            unread.forEach((name, value) -> { if (value) marked.add(name); });
+            this.unread = Collections.unmodifiableSet(marked);
+            this.selected = selected;
+        }
+    }
+    private volatile BufferSnapshot bufferSnapshot = new BufferSnapshot(Collections.emptyList(), Collections.emptyMap(), "System");
+    public BufferSnapshot getBufferSnapshot() { return bufferSnapshot; }
     @Inject
     private IrcConfig config;
     @Inject
@@ -376,12 +391,20 @@ public class IrcPanel extends PluginPanel {
 
     /** Pushes a fresh roster in. Only redraws when it is for the buffer currently on screen. */
     public void setChannelUsers(String channel, List<ChannelUserList.Entry> entries) {
+        for (String existing : getChannelNames()) {
+            if (existing.equalsIgnoreCase(channel)) { channel = existing; break; }
+        }
         channelUserSnapshots.put(channel, entries);
         // equalsIgnoreCase, not equals: the channel name here comes from a server numeric and the
         // tab title from a JOIN echo, which need not agree on casing.
         if (tabbedPane != null && channel.equalsIgnoreCase(getCurrentChannel())) {
             repopulateNickDropdown();
         }
+    }
+
+    public void clearChannelUsers() {
+        channelUserSnapshots.clear();
+        repopulateNickDropdown();
     }
 
     /**
@@ -642,6 +665,7 @@ public class IrcPanel extends PluginPanel {
     }
 
     private void refreshDesktopChannels() {
+        bufferSnapshot = new BufferSnapshot(getChannelNames(), unreadMessages, getCurrentChannel());
         if (desktopLayout != null) desktopLayout.updateChannels(getChannelNames(), getCurrentChannel());
     }
 
@@ -692,7 +716,7 @@ public class IrcPanel extends PluginPanel {
 
         channelPanes.put(channel, pane);
         unreadMessages.put(channel, false);
-        tabbedPane.addTab(channel, new JScrollPane(pane));
+        tabbedPane.addTab(channel, scrollPane);
         if (config.autofocusOnNewTab() || channel.equals(config.channel()) || channelPanes.size() == 2) {
             tabbedPane.setSelectedIndex(tabbedPane.getTabCount() - 1);
             this.setFocusedChannel(channel);
@@ -866,6 +890,7 @@ public class IrcPanel extends PluginPanel {
 
 
     public static class ChannelPane extends JTextPane {
+        private boolean renderPending;
         private final IrcConfig config;
         private ArrayList<String> messageLog;
         private static final Pattern UNDERLINE = Pattern.compile("\u001F([^\u001F\u000F]+)[\u001F\u000F]?");
@@ -913,7 +938,10 @@ public class IrcPanel extends PluginPanel {
             if (messageLog.size() > config.getMaxScrollback()) {
                 messageLog.remove(0);
             }
+            if (renderPending) return;
+            renderPending = true;
             SwingUtilities.invokeLater(() -> {
+                renderPending = false;
                 setText("<html><body style='color:" + ColorUtil.toHexColor(ColorScheme.TEXT_COLOR) + ";'>" + String.join("", messageLog) + "</body></html>");
                 setCaretPosition(getDocument().getLength());
             });

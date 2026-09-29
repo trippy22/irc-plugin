@@ -4,6 +4,8 @@ import com.irc.model.IrcMessage;
 import com.irc.overlay.IrcOverlay;
 import com.irc.protocol.IrcFormatting;
 import com.irc.session.IrcAdapter;
+import com.irc.protocol.SimpleIrcClient;
+import net.runelite.client.callback.ClientThread;
 import com.irc.ui.IrcPanel;
 
 import com.google.inject.Provides;
@@ -63,14 +65,16 @@ public class IrcPlugin extends Plugin {
     private KeyManager keyManager;
     private IrcOverlay overlay;
     @Nullable
-    private IrcAdapter ircAdapter;
-    private IrcPanel panel;
+    private volatile IrcAdapter ircAdapter;
+    private volatile IrcPanel panel;
     @Inject
     private EmojiService emojiService;
 
     private static final Pattern VALID_WINKS = Pattern.compile("^;([opdOPD)(<>]|[-_];)");
 
-    private final Map<String, String> channelPasswords = new HashMap<>();
+    @Inject private ClientThread clientThread;
+    private String configuredNick;
+    private boolean reloading;
 
     @Override
     protected void startUp() throws Exception {
@@ -83,12 +87,18 @@ public class IrcPlugin extends Plugin {
         overlay = new IrcOverlay(client, panel, config, keyManager);
         overlayManager.add(overlay);
         emojiService.initialize();
-        connectToIrc();
-        joinDefaultChannel();
+        Runnable connect = () -> { connectToIrc(null); joinDefaultChannel(); };
+        if (SwingUtilities.isEventDispatchThread()) connect.run();
+        else SwingUtilities.invokeAndWait(connect);
     }
 
     @Override
-    protected void shutDown() {
+    protected void shutDown() throws Exception {
+        if (SwingUtilities.isEventDispatchThread()) stopOnEdt();
+        else SwingUtilities.invokeAndWait(this::stopOnEdt);
+    }
+
+    private void stopOnEdt() {
         // Cut the adapter's path to the UI first: a LIST reply already in flight would otherwise
         // re-open the channel browser onto a panel that is on its way out.
         if (ircAdapter != null) {
@@ -99,7 +109,7 @@ public class IrcPlugin extends Plugin {
             IrcPanel closingPanel = panel;
             panel = null;
             clientToolbar.removeNavigation(closingPanel.getNavigationButton());
-            SwingUtilities.invokeLater(closingPanel::shutdown);
+            closingPanel.shutdown();
         }
         if (ircAdapter != null) {
             ircAdapter.disconnect("Plugin shutting down");
@@ -110,7 +120,7 @@ public class IrcPlugin extends Plugin {
             overlayManager.remove(overlay);
             overlay = null;
         }
-        channelPasswords.clear();
+        reloading = false;
     }
 
     @Provides
@@ -118,20 +128,25 @@ public class IrcPlugin extends Plugin {
         return configManager.getConfig(IrcConfig.class);
     }
 
-    private void connectToIrc() {
+    private void connectToIrc(String retainedNick) {
         // Seed nick only; once connected the network's confirmed nick (tracked by the
         // adapter from the raw NICK event) is the source of truth - see ircAdapter.getNick().
         String initialNick;
-        if (Strings.isNullOrEmpty(config.username())) {
+        if (retainedNick != null) {
+            initialNick = retainedNick;
+        } else if (Strings.isNullOrEmpty(config.username())) {
             initialNick = "RLGuest" + (int) (Math.random() * 9999 + 1);
         } else {
-            initialNick = config.username().replace(" ", "_");
+            initialNick = sanitizeNick(config.username());
         }
 
-        ircAdapter = new IrcAdapter();
+        configuredNick = config.username();
+        ircAdapter = createAdapter();
         ircAdapter.initialize(config, this::processMessage, panel, initialNick);
         ircAdapter.connect();
     }
+
+    IrcAdapter createAdapter() { return new IrcAdapter(); }
 
     private void setupPanel() {
         panel = injector.getInstance(IrcPanel.class);
@@ -160,11 +175,17 @@ public class IrcPlugin extends Plugin {
     }
 
     private void handleMessageSend(String channel, String message) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            IrcAdapter session = ircAdapter;
+            SwingUtilities.invokeLater(() -> { if (ircAdapter == session) handleMessageSend(channel, message); });
+            return;
+        }
+        if (panel == null || ircAdapter == null) return;
         if (message.startsWith("/") ||
                 (message.startsWith(config.prefix())
                         && message.length() > config.prefix().length())) {
             handleCommand(message);
-        } else {
+        } else if (!rejectDuringReload()) {
             sendMessage(channel, message);
         }
     }
@@ -175,6 +196,8 @@ public class IrcPlugin extends Plugin {
         String[] parts = command.split(" ", 2);
         String cmd = parts[0].toLowerCase().substring(1);
         String arg = parts.length > 1 ? parts[1].trim() : "";
+        if (!Arrays.asList("join", "part", "leave", "close", "c", "go", "clear", "help").contains(cmd)
+                && rejectDuringReload()) return;
 
         switch (cmd) {
             case "join":
@@ -222,7 +245,7 @@ public class IrcPlugin extends Plugin {
                     String target = msgParts[0];
                     String msg = msgParts[1];
 
-                    SwingUtilities.invokeLater(() -> panel.addChannel(target));
+                    panel.addChannel(target);
                     sendMessage(target, msg);
                 }
                 if (panel != null && msgParts.length > 0) {
@@ -370,8 +393,7 @@ public class IrcPlugin extends Plugin {
     /**
      * Single entry point for both /list and the panel's Browse button.
      *
-     * sendRawLine silently no-ops when the socket is down, so an unconnected /list would look
-     * like nothing happened at all - check first and say so.
+     * The adapter starts the response timeout after LIST is actually flushed to the socket.
      */
     private void handleChannelListRequest(String query) {
         if (ircAdapter == null || panel == null) return;
@@ -386,10 +408,6 @@ public class IrcPlugin extends Plugin {
         processMessage(new IrcMessage(
                 "System", "System", "Requesting channel list...",
                 IrcMessage.MessageType.SYSTEM, Instant.now()));
-        // Arm before sending. sendRawLine writes and flushes synchronously, so arming afterwards
-        // leaves a window - vanishingly small, but real - in which a 323 round-trips and queues
-        // its cancel ahead of this arm, and the arm then fires "no response" over a rendered list.
-        SwingUtilities.invokeLater(panel::armChannelListTimeout);
         ircAdapter.requestChannelList(query);
     }
 
@@ -402,6 +420,7 @@ public class IrcPlugin extends Plugin {
      * user watching game chat with the sidebar collapsed seeing the request and never the outcome.
      */
     private void reportChannelListTimeout() {
+        if (ircAdapter != null) ircAdapter.channelListTimedOut();
         processMessage(new IrcMessage(
                 "System", "System", "No channel list response from the server.",
                 IrcMessage.MessageType.SYSTEM, Instant.now()));
@@ -454,11 +473,13 @@ public class IrcPlugin extends Plugin {
 
     private void promptForIdentify(String account) {
         if (ircAdapter == null) return;
-
+        IrcAdapter session = ircAdapter;
+        IrcPanel targetPanel = panel;
         SwingUtilities.invokeLater(() -> {
+            if (ircAdapter != session || panel != targetPanel || targetPanel == null) return;
             String acct = account;
             if (acct == null) {
-                acct = JOptionPane.showInputDialog(panel.getChatContent(),
+                acct = JOptionPane.showInputDialog(targetPanel.getChatContent(),
                         "Enter your NickServ account (leave blank to identify by nick):",
                         "Account (optional)", JOptionPane.QUESTION_MESSAGE);
                 if (acct == null) return; // cancelled
@@ -466,14 +487,14 @@ public class IrcPlugin extends Plugin {
             }
 
             JPasswordField passwordField = new JPasswordField();
-            int result = JOptionPane.showConfirmDialog(panel.getChatContent(), passwordField,
+            int result = JOptionPane.showConfirmDialog(targetPanel.getChatContent(), passwordField,
                     "Enter your NickServ password", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
             if (result != JOptionPane.OK_OPTION) return;
 
             String password = new String(passwordField.getPassword());
-            if (password.isEmpty()) return;
+            if (password.isEmpty() || ircAdapter != session || panel != targetPanel || reloading) return;
 
-            ircAdapter.getClient().sendMessage("NickServ", identifyCommand(acct, password));
+            session.getClient().sendMessage("NickServ", identifyCommand(acct, password));
         });
     }
 
@@ -512,15 +533,18 @@ public class IrcPlugin extends Plugin {
     }
 
     private void joinChannel(String channels, String password) {
+        if (ircAdapter == null) return;
         for (String channel : channels.split(",")) {
-            if (ircAdapter == null) return;
-            if (password != null && !password.isEmpty()) {
-                channelPasswords.put(channel.toLowerCase(), password);
-            }
-            ircAdapter.joinChannel(channel, password);
+            channel = channel.trim();
+            if (!reloading) ircAdapter.joinChannel(channel, password);
+            else if (SimpleIrcClient.validChannel(channel)) {
+                // The closing client retains intent; reload copies its latest snapshot on the EDT.
+                ircAdapter.getClient().joinChannel(channel, password);
+                panel.addChannel(channel);
+            } else processMessage(new IrcMessage("System", "System", "Invalid channel name: " + channel,
+                    IrcMessage.MessageType.SYSTEM, Instant.now()));
         }
     }
-
     private void closePane(String argument) {
         if (panel == null) return;
 
@@ -538,7 +562,7 @@ public class IrcPlugin extends Plugin {
             if (currentChannel.startsWith("#")) {
                 leaveChannel(currentChannel);
             } else {
-                SwingUtilities.invokeLater(() -> panel.removeChannel(currentChannel));
+                panel.removeChannel(currentChannel);
             }
         } else if (target.startsWith("#")) {
             if (reason != null) {
@@ -547,7 +571,7 @@ public class IrcPlugin extends Plugin {
                 leaveChannel(target);
             }
         } else if (panel.isPane(target)) {
-            SwingUtilities.invokeLater(() -> panel.removeChannel(target));
+            panel.removeChannel(target);
         } else {
             if (currentChannel.startsWith("#")) {
                 leaveChannel(currentChannel, argument);
@@ -555,34 +579,16 @@ public class IrcPlugin extends Plugin {
         }
     }
 
-    private void leaveChannel(String channel) {
-        if (ircAdapter == null) return;
-
-        if (channel.startsWith("#")) {
-            ircAdapter.leaveChannel(channel);
-            channelPasswords.remove(channel.toLowerCase());
-            panel.removeChannel(channel);
-        }
-
-        if (panel != null) {
-            SwingUtilities.invokeLater(() -> panel.removeChannel(channel));
-        }
-    }
+    private void leaveChannel(String channel) { leaveChannel(channel, null); }
 
     private void leaveChannel(String channel, String reason) {
-        if (ircAdapter == null) return;
-
-        if (channel.startsWith("#")) {
-            ircAdapter.leaveChannel(channel, reason);
-            channelPasswords.remove(channel.toLowerCase());
-            panel.removeChannel(channel);
+        if (ircAdapter == null || panel == null) return;
+        if (SimpleIrcClient.isChannel(channel)) {
+            if (reloading) ircAdapter.getClient().leaveChannel(channel, reason);
+            else ircAdapter.leaveChannel(channel, reason);
         }
-
-        if (panel != null) {
-            SwingUtilities.invokeLater(() -> panel.removeChannel(channel));
-        }
+        panel.removeChannel(channel);
     }
-
     private void handleChannelJoin(String channel, String password) {
         joinChannel(channel, password);
     }
@@ -591,18 +597,29 @@ public class IrcPlugin extends Plugin {
         leaveChannel(channel);
     }
 
-    private void handleReconnect(Boolean ignored) {
-        if (ircAdapter == null || panel == null) return;
-        ircAdapter.disconnect("Reloading, brb");
-        connectToIrc();
-        for (String channel : panel.getChannelNames()) {
-            if (channel.startsWith("#")) {
-                String password = channelPasswords.getOrDefault(channel.toLowerCase(), "");
-                handleChannelJoin(channel, password);
-            }
-        }
+    private boolean rejectDuringReload() {
+        if (reloading) processMessage(new IrcMessage("System", "System", "Reconnecting; command was not sent.",
+                IrcMessage.MessageType.SYSTEM, Instant.now()));
+        return reloading;
     }
 
+    private void handleReconnect(Boolean ignored) {
+        if (ircAdapter == null || panel == null || reloading) return;
+        reloading = true;
+        IrcAdapter old = ircAdapter;
+        old.clearPanel();
+        panel.cancelChannelListTimeout();
+        panel.clearChannelUsers();
+        old.disconnect("Reloading, brb");
+        old.getClient().onDisconnected(() -> SwingUtilities.invokeLater(() -> {
+            if (ircAdapter != old || panel == null) return;
+            Map<String, String> channels = old.getClient().getDesiredChannels();
+            String nick = Objects.equals(configuredNick, config.username()) ? old.getClient().getConfirmedNick() : null;
+            connectToIrc(nick);
+            channels.forEach(ircAdapter.getClient()::joinChannel);
+            reloading = false;
+        }));
+    }
     private void sendMessage(String target, String message) {
         if (ircAdapter == null) return;
         ircAdapter.sendMessage(target, message);
@@ -618,46 +635,36 @@ public class IrcPlugin extends Plugin {
     }
 
     private void processMessage(IrcMessage message) {
-        IrcMessage.MessageType[] chatBoxEvents = {IrcMessage.MessageType.QUIT, IrcMessage.MessageType.NICK_CHANGE};
-
-        if (panel != null) {
-            if (!panel.getChannelNames().contains(message.getChannel())) {
-                for (String channel : panel.getChannelNames()) {
-                    if (channel.equalsIgnoreCase(message.getChannel())) {
-                        SwingUtilities.invokeLater(() -> {
-                            if (panel != null) panel.renameChannel(channel, message.getChannel());
-                        });
-                    }
-                }
+        IrcPanel targetPanel = panel;
+        IrcAdapter session = ircAdapter;
+        if (targetPanel == null) return;
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> {
+                if (panel == targetPanel && ircAdapter == session) processMessage(message);
+            });
+            return;
+        }
+        for (String channel : targetPanel.getChannelNames()) {
+            if (!channel.equals(message.getChannel()) && channel.equalsIgnoreCase(message.getChannel())) {
+                targetPanel.renameChannel(channel, message.getChannel());
+                break;
             }
         }
-
-        if (client.getGameState() == GameState.LOGGED_IN) {
-            boolean activeChannelCondition = panel == null || panel.getCurrentChannel().equalsIgnoreCase(message.getChannel());
-            boolean isSystemEvent = message.getChannel().equals("System") && Arrays.binarySearch(chatBoxEvents, message.getType()) > -1;
-
-            if (!config.activeChannelOnly() || (config.activeChannelOnly() && (activeChannelCondition || isSystemEvent))) {
+        boolean active = targetPanel.getCurrentChannel().equalsIgnoreCase(message.getChannel());
+        boolean systemEvent = message.getChannel().equals("System")
+                && (message.getType() == IrcMessage.MessageType.QUIT || message.getType() == IrcMessage.MessageType.NICK_CHANGE);
+        if (!config.activeChannelOnly() || active || systemEvent) {
+            clientThread.invokeLater(() -> {
+                if (panel != targetPanel || ircAdapter != session || client.getGameState() != GameState.LOGGED_IN) return;
                 chatMessageManager.queue(QueuedMessage.builder()
-                        .type(config.getChatboxType().getType())
-                        .sender(message.getChannel())
-                        .name(message.getSender())
-                        .runeLiteFormattedMessage(
-                                new ChatMessageBuilder()
-                                        .append(ChatColorType.NORMAL)
-                                        .append(EmojiParser.parseToAliases(
-                                                stripStyles(message.getContent())
-                                        ))
-                                        .build())
-                        .timestamp((int) (message.getTimestamp().getEpochSecond()))
-                        .build());
-            }
+                        .type(config.getChatboxType().getType()).sender(message.getChannel()).name(message.getSender())
+                        .runeLiteFormattedMessage(new ChatMessageBuilder().append(ChatColorType.NORMAL)
+                                .append(EmojiParser.parseToAliases(stripStyles(message.getContent()))).build())
+                        .timestamp((int) message.getTimestamp().getEpochSecond()).build());
+            });
         }
-
-        if (panel != null) {
-            SwingUtilities.invokeLater(() -> panel.addMessage(message));
-        }
+        targetPanel.addMessage(message);
     }
-
     private void updatePanelHost(boolean rebuildNavigation) {
         SwingUtilities.invokeLater(() -> {
             if (panel == null) return;
@@ -698,9 +705,7 @@ public class IrcPlugin extends Plugin {
             }
         } else if ("overlayDynamic".equals(configChanged.getKey())) {
             if (overlay != null) {
-                overlayManager.remove(overlay);
-                overlay = new IrcOverlay(client, panel, config, keyManager);
-                overlayManager.add(overlay);
+                overlay.updatePosition();
             }
         }
     }
@@ -719,7 +724,8 @@ public class IrcPlugin extends Plugin {
             int intStackCount = client.getIntStackSize();
             intStack[intStackCount - 3] = 1;
 
-            String currentChannel = panel != null ? panel.getCurrentChannel() : this.config.channel();
+            IrcPanel targetPanel = panel;
+            String currentChannel = targetPanel != null ? targetPanel.getBufferSnapshot().selected : this.config.channel();
             handleMessageSend(currentChannel, message.substring(1));
         }
     }

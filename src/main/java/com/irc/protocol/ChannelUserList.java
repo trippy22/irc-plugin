@@ -8,7 +8,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
+import java.util.function.Consumer;
 import java.util.Map;
 import java.util.Set;
 
@@ -18,8 +18,7 @@ import java.util.Set;
  * Written from the socket reader thread and read from the Swing EDT, so every method is
  * synchronized and {@link #snapshot} hands back an unmodifiable copy rather than a live view.
  *
- * Channels and nicks are keyed by their ASCII-lowercased form because IRC treats them
- * case-insensitively, but the server's casing is preserved for display.
+ * Channels and nicks use the server CASEMAPPING rules; display spelling is preserved.
  */
 public class ChannelUserList {
 
@@ -43,6 +42,7 @@ public class ChannelUserList {
     private static final class Channel {
         private final String displayName;
         private final Map<String, User> users = new HashMap<>();
+        private final List<Consumer<Channel>> deltas = new ArrayList<>();
 
         Channel(String displayName) {
             this.displayName = displayName;
@@ -53,12 +53,37 @@ public class ChannelUserList {
     private final Map<String, Channel> live = new HashMap<>();
     private final Map<String, Channel> pending = new HashMap<>();
 
+    private void change(String channel, Consumer<Channel> delta) {
+        String k = key(channel);
+        Channel buffer = pending.get(k);
+        if (buffer != null) buffer.deltas.add(delta);
+        Channel ch = live.get(k);
+        if (ch != null) delta.accept(ch);
+    }
+
+    /** Reindex after CASEMAPPING changes, preserving display spelling. */
+    synchronized void reindex() {
+        reindex(live);
+        reindex(pending);
+    }
+
+    private void reindex(Map<String, Channel> map) {
+        List<Channel> channels = new ArrayList<>(map.values());
+        map.clear();
+        for (Channel ch : channels) {
+            List<User> users = new ArrayList<>(ch.users.values());
+            ch.users.clear();
+            for (User user : users) ch.users.put(key(user.displayNick), user);
+            map.put(key(ch.displayName), ch);
+        }
+    }
+
     ChannelUserList(ModeSpec spec) {
         this.spec = spec;
     }
 
-    private static String key(String value) {
-        return value.toLowerCase(Locale.ROOT);
+    private String key(String value) {
+        return spec.fold(value);
     }
 
     /**
@@ -98,52 +123,53 @@ public class ChannelUserList {
     synchronized void endNames(String channel) {
         Channel buffer = pending.remove(key(channel));
         if (buffer != null) {
+            // Replay after every chunk has arrived: a later 353 must not resurrect a departed nick.
+            buffer.deltas.forEach(delta -> delta.accept(buffer));
+            buffer.deltas.clear();
             live.put(key(channel), buffer);
         }
     }
 
     synchronized void join(String channel, String nick) {
-        live.computeIfAbsent(key(channel), k -> new Channel(channel))
-                .users.computeIfAbsent(key(nick), k -> new User(nick));
+        live.computeIfAbsent(key(channel), k -> new Channel(channel));
+        change(channel, ch -> ch.users.computeIfAbsent(key(nick), k -> new User(nick)));
     }
 
     synchronized void part(String channel, String nick) {
-        Channel ch = live.get(key(channel));
-        if (ch != null) {
-            ch.users.remove(key(nick));
-        }
+        change(channel, ch -> ch.users.remove(key(nick)));
     }
 
-    synchronized void kick(String channel, String nick) {
-        part(channel, nick);
-    }
+    synchronized void kick(String channel, String nick) { part(channel, nick); }
 
-    /** Removes the nick everywhere; returns the display names of the channels that changed. */
     synchronized List<String> quit(String nick) {
         List<String> affected = new ArrayList<>();
-        for (Channel ch : live.values()) {
-            if (ch.users.remove(key(nick)) != null) {
-                affected.add(ch.displayName);
-            }
+        Set<String> names = new LinkedHashSet<>(live.keySet());
+        names.addAll(pending.keySet());
+        for (String name : names) {
+            Channel ch = live.containsKey(name) ? live.get(name) : pending.get(name);
+            if (ch.users.containsKey(key(nick))) affected.add(ch.displayName);
+            part(ch.displayName, nick);
         }
         return affected;
     }
 
-    /** Re-keys the nick everywhere, keeping modes; returns the channels that changed. */
     synchronized List<String> rename(String oldNick, String newNick) {
         List<String> affected = new ArrayList<>();
-        for (Channel ch : live.values()) {
-            User user = ch.users.remove(key(oldNick));
-            if (user == null) {
-                continue;
-            }
-            user.displayNick = newNick;
-            ch.users.put(key(newNick), user);
-            affected.add(ch.displayName);
+        Set<String> names = new LinkedHashSet<>(live.keySet());
+        names.addAll(pending.keySet());
+        for (String name : names) {
+            Channel ch = live.containsKey(name) ? live.get(name) : pending.get(name);
+            if (ch.users.containsKey(key(oldNick))) affected.add(ch.displayName);
+            change(ch.displayName, channel -> {
+                User user = channel.users.remove(key(oldNick));
+                if (user != null) {
+                    user.displayNick = newNick;
+                    channel.users.put(key(newNick), user);
+                }
+            });
         }
         return affected;
     }
-
     /**
      * Applies a MODE change. {@code modeParams} is the MODE command's parameters minus the
      * target, e.g. {@code ["+mo", "bob"]}.
@@ -156,11 +182,6 @@ public class ChannelUserList {
         if (modeParams == null || modeParams.isEmpty()) {
             return;
         }
-        Channel ch = live.get(key(channel));
-        if (ch == null) {
-            return;
-        }
-
         String modeString = modeParams.get(0);
         int paramIndex = 1;
         boolean adding = true;
@@ -187,15 +208,15 @@ public class ChannelUserList {
             if (param == null || !spec.isPrefixMode(letter)) {
                 continue;
             }
-            User user = ch.users.get(key(param));
-            if (user == null) {
-                continue;
-            }
-            if (adding) {
-                user.modes.add(letter);
-            } else {
-                user.modes.remove(letter);
-            }
+            final String nick = param;
+            final boolean add = adding;
+            change(channel, ch -> {
+                User user = ch.users.get(key(nick));
+                if (user != null) {
+                    if (add) user.modes.add(letter);
+                    else user.modes.remove(letter);
+                }
+            });
         }
     }
 

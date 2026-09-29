@@ -114,15 +114,16 @@ public class IrcOverlay extends Overlay implements KeyListener {
         graphics.fillRect(x, y, width, height);
 
         // tabs
-        java.util.List<String> channels = panel.getChannelNames();
-        int activeTabIndex = Math.max(0, channels.indexOf(panel.getCurrentChannel()));
+        IrcPanel.BufferSnapshot buffers = panel.getBufferSnapshot();
+        java.util.List<String> channels = buffers.names;
+        int activeTabIndex = Math.max(0, channels.indexOf(buffers.selected));
 
         int xOffset = 0;
         int yOffset = 0;
         for (int i = 0; i < channels.size(); i++) {
             boolean isActive = i == activeTabIndex;
             String channel = channels.get(i);
-            boolean isUnread = panel.unreadMessages.get(channel);
+            boolean isUnread = buffers.unread.contains(channel);
 
             FontMetrics fm = graphics.getFontMetrics();
             int tabWidth = fm.stringWidth(channel) + padding * 2 - tabSpacing; // 8px padding each side
@@ -149,20 +150,20 @@ public class IrcOverlay extends Overlay implements KeyListener {
 
     @Override
     public void keyPressed(KeyEvent e) {
-        if (panel == null || panel.getChannelPanes() == null) return;
+        if (panel == null) return;
 
         if (e.getKeyCode() == KeyEvent.VK_PAGE_UP && this.config.pageUpDownNavigation()) {
-            panel.cycleChannelBackwards();
+            javax.swing.SwingUtilities.invokeLater(panel::cycleChannelBackwards);
             e.consume();
         } else if (e.getKeyCode() == KeyEvent.VK_PAGE_DOWN && this.config.pageUpDownNavigation()) {
-            panel.cycleChannel();
+            javax.swing.SwingUtilities.invokeLater(panel::cycleChannel);
             e.consume();
         } else if (this.config.backTickNavigation()) {
             if (e.getKeyCode() == KeyEvent.VK_BACK_QUOTE && (e.getModifiersEx() & KeyEvent.SHIFT_DOWN_MASK) != 0) {
-                panel.cycleChannelBackwards();
+                javax.swing.SwingUtilities.invokeLater(panel::cycleChannelBackwards);
                 e.consume();
             } else if (e.getKeyCode() == KeyEvent.VK_BACK_QUOTE) {
-                panel.cycleChannel();
+                javax.swing.SwingUtilities.invokeLater(panel::cycleChannel);
                 e.consume();
             }
         }
