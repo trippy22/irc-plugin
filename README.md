@@ -201,6 +201,26 @@ You can ask in `#irchelp` for IRC-specific questions.
 /join #irchelp
 ```
 
+### Connection and reload behavior
+
+- Reload closes the previous connection before starting another. It retains your last accepted
+  nickname unless you changed the configured nickname, and restores requested channels and their
+  latest keys after the server accepts registration. Closing a channel removes it from that list,
+  including when it was still waiting to join. Tabs, messages, and drafts remain in place.
+- A channel becomes joined only when the server confirms it. Failed joins and kicks clear no
+  other channel's state. Reload explicitly retries requested channels, including failed or kicked
+  channels; the plugin does not automatically reconnect or rejoin after a kick.
+- A rejected manual nickname change keeps your accepted nickname. Initial nickname collisions
+  get up to five numbered retries; an invalid initial nickname stops registration and asks you
+  to choose another nickname and reconnect.
+- Outgoing commands use a bounded queue paced at one command per 600 ms. Registration and
+  keepalive traffic have priority. Your message appears locally after the socket write succeeds;
+  this is not a delivery receipt, and a later server error can still reject it. Commands that
+  cannot be queued are reported in System. Lines exceeding 510 UTF-8 bytes must be shortened.
+- TCP connect and TLS handshake attempts time out after 15 seconds, registration after 30 seconds,
+  and an established connection after 240 seconds without incoming data. Disconnect can cancel
+  an attempt in progress; a graceful QUIT gets at most 250 ms before the socket is closed.
+
 ## Troubleshooting Connection Problems
 
 The plugin reports why a connection failed rather than leaving you to guess. When something goes
@@ -213,9 +233,8 @@ wrong you should see one of:
   `Failed while connecting to irc.swiftirc.net:6697 - ConnectException: Connection refused`. The
   message names what was being attempted (connecting, the TLS handshake, registering, or reading
   from an established connection) so a firewall problem is distinguishable from a server problem.
-- **A silent close.** `Connection closed: server closed the connection during registration,
-  without saying why` usually means the server dropped you without explanation - a ban or a
-  connection throttle.
+- **A silent close.** `Disconnected from IRC (Server closed the connection)` means the server
+  dropped the connection without providing a reason.
 
 Disconnect messages carry the cause where one is known, so `Disconnected from IRC (Ping timeout:
 240 seconds)` tells you it was not your own `/quit`.

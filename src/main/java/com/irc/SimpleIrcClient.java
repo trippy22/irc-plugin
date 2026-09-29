@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.net.Socket;
+import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
@@ -33,23 +34,37 @@ import java.util.regex.Pattern;
 public class SimpleIrcClient {
     private static final Pattern MESSAGE_PATTERN =
             Pattern.compile("^(?:[:@](\\S+) )?(\\S+)(?: ((?:[^:\\s]\\S* ?)*))?(?: ?:(.*))?$");
-    private static final Pattern NUMERIC = Pattern.compile("^[0-9]+$");
+    private static final Pattern NUMERIC = Pattern.compile("^[0-9]{3}$");
 
-    private Socket socket;
+    private volatile Socket transport;
+    private final IrcOutput output = new IrcOutput();
+    private static final java.util.concurrent.ScheduledThreadPoolExecutor CLOSER =
+            new java.util.concurrent.ScheduledThreadPoolExecutor(1, r -> {
+                Thread t = new Thread(r, "irc-close"); t.setDaemon(true); return t;
+            });
+    static { CLOSER.setRemoveOnCancelPolicy(true); }
+    private boolean started;
+    private volatile boolean registered;
+    private boolean closed;
+    private final java.util.concurrent.CompletableFuture<Void> closedFuture = new java.util.concurrent.CompletableFuture<>();
+    private int nickRetries;
+    private String requestedNick;
+    @Getter private volatile String confirmedNick;
+    private java.util.concurrent.ScheduledFuture<?> registrationDeadline;
     private BufferedWriter writer;
     private BufferedReader reader;
-    private final ExecutorService executor = Executors.newFixedThreadPool(2);
+    private final ExecutorService executor = Executors.newFixedThreadPool(2, r -> { Thread t = new Thread(r, "irc-session"); t.setDaemon(true); return t; });
     private final List<IrcEventListener> listeners = new CopyOnWriteArrayList<>();
 
     @Getter
-    private String nick;
+    private volatile String nick;
     private String username;
     private String realName;
     private String saslAccount;
     private String saslPassword;
     private boolean saslEnabled = false;
-    @Getter
     private final Set<String> channels = new HashSet<>();
+    private final Map<String, String> desiredChannels = new java.util.LinkedHashMap<>();
     private final ModeSpec modeSpec = ModeSpec.defaults();
     private final ChannelUserList channelUserList = new ChannelUserList(modeSpec);
     /**
@@ -90,7 +105,7 @@ public class SimpleIrcClient {
     private String host;
     private int port;
     private boolean secure;
-    private boolean connected = false;
+    private volatile boolean connected = false;
     private volatile boolean shuttingDown = false;
     /**
      * Why the link went down, in the server's or the JDK's own words. Set by whichever path
@@ -122,6 +137,7 @@ public class SimpleIrcClient {
 
     public SimpleIrcClient credentials(String nick, String username, String realName) {
         this.nick = nick;
+        this.requestedNick = nick;
         this.username = username;
         this.realName = realName;
         return this;
@@ -138,84 +154,71 @@ public class SimpleIrcClient {
         return Base64.getEncoder().encodeToString(payload.getBytes(StandardCharsets.UTF_8));
     }
 
-    public void connect() {
-        shuttingDown = false;
-        disconnectReason = null;
-        connectPhase = ConnectPhase.CONNECTING;
+    public synchronized void connect() {
+        if (started || shuttingDown) return; // A client represents exactly one session.
+        started = true;
         executor.submit(() -> {
             try {
-                if (secure) {
-                    SSLSocket sslSocket = openSecureSocket();
-                    // Split from the socket open so a certificate failure is not reported as a
-                    // refused connection.
-                    connectPhase = ConnectPhase.TLS_HANDSHAKE;
-                    sslSocket.startHandshake();
-                    socket = sslSocket;
-                } else {
-                    socket = new Socket(host, port);
+                Socket tcp = new Socket();
+                synchronized (this) {
+                    if (shuttingDown) { tcp.close(); return; }
+                    transport = tcp; // Publish before connect so cancellation can close it.
                 }
-
-                connectPhase = ConnectPhase.REGISTERING;
-                writer = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
-                reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-
-                advertisedCaps.clear();
-                capEndSent = false;
-                capHistorySupported = false;
-                sendRawLine("NICK " + nick);
-                sendRawLine("USER " + username + " 0 * :" + realName);
-                sendRawLine("CAP LS 302");
-
-                connected = true;
-                fireEvent(new IrcEvent(IrcEvent.Type.CONNECT, null, null, null, null));
-
-                String line;
-                try {
-                    while (!shuttingDown && (line = reader.readLine()) != null) {
-                        processLine(line);
-                    }
-
-                    if (!shuttingDown) {
-                        // readLine() returned null: the peer closed the socket without an ERROR
-                        // line. Saying so beats a bare "Disconnected from IRC", which is
-                        // indistinguishable from the user's own /quit. A close during
-                        // registration is worth calling out separately - that is the shape of a
-                        // silent rejection (K-line, throttle, bad CAP negotiation).
-                        if (disconnectReason == null) {
-                            String reason = connectPhase == ConnectPhase.REGISTERING
-                                    ? "server closed the connection during registration, without saying why"
-                                    : "server closed the connection without sending an error";
-                            recordDisconnectReason(reason);
-                            log.warn("IRC connection to {}:{} closed by peer during {} with no ERROR line",
-                                    host, port, connectPhase);
-                            fireEvent(new IrcEvent(IrcEvent.Type.ERROR, null, null,
-                                    "Connection closed: " + reason, null));
-                        }
+                tcp.connect(new InetSocketAddress(host, port), 15000);
+                tcp.setSoTimeout(READ_TIMEOUT_MS);
+                Socket link = tcp;
+                if (secure) {
+                    connectPhase = ConnectPhase.TLS_HANDSHAKE;
+                    SSLSocket tls = (SSLSocket) ((SSLSocketFactory) SSLSocketFactory.getDefault())
+                            .createSocket(tcp, host, port, true);
+                    applyTlsSettings(tls);
+                    tls.setSoTimeout(15000);
+                    tls.startHandshake();
+                    tls.setSoTimeout(READ_TIMEOUT_MS);
+                    link = tls;
+                }
+                synchronized (this) {
+                    if (shuttingDown) return;
+                    writer = new BufferedWriter(new OutputStreamWriter(link.getOutputStream(), StandardCharsets.UTF_8));
+                    reader = new BufferedReader(new InputStreamReader(link.getInputStream(), StandardCharsets.UTF_8));
+                    connectPhase = ConnectPhase.REGISTERING;
+                    connected = true;
+                    executor.submit(() -> output.run(writer, this::writeFailed,
+                            line -> { if (rawLogging) log.info("IRC >> {}", redactForLog(line)); }));
+                    sendRawLine("CAP LS 302");
+                    sendRawLine("NICK " + requestedNick);
+                    sendRawLine("USER " + username + " 0 * :" + realName);
+                    fireEvent(new IrcEvent(IrcEvent.Type.CONNECT, null, null, null, null));
+                }
+                synchronized (this) {
+                    if (shuttingDown) return;
+                    registrationDeadline = CLOSER.schedule(() -> {
+                    if (!registered && !shuttingDown) {
+                        recordDisconnectReason("Registration timed out after 30 seconds");
                         disconnect();
                     }
-                } catch (IOException e) {
-                    if (!shuttingDown) {
-                        String described = describeFailure(connectPhase, host, port, e);
-                        recordDisconnectReason(described);
-                        log.warn("IRC read from {}:{} failed during {}", host, port, connectPhase, e);
-                        fireEvent(new IrcEvent(IrcEvent.Type.ERROR, null, null, described, null));
-                    }
+                    }, 30, java.util.concurrent.TimeUnit.SECONDS);
                 }
+                String line;
+                while (!shuttingDown && (line = reader.readLine()) != null) processLine(line);
+                if (!shuttingDown) recordDisconnectReason("Server closed the connection");
             } catch (Exception e) {
                 if (!shuttingDown) {
                     String described = describeFailure(connectPhase, host, port, e);
                     recordDisconnectReason(described);
-                    log.error("IRC connection to {}:{} failed during {}", host, port, connectPhase, e);
                     fireEvent(new IrcEvent(IrcEvent.Type.ERROR, null, null, described, null));
                 }
             } finally {
-                if (!shuttingDown) {
-                    disconnect();
-                }
+                if (!shuttingDown) disconnect();
             }
         });
     }
 
+    private void writeFailed(IOException failure) {
+        if (shuttingDown) return;
+        recordDisconnectReason("Write failed; queued messages may not have been delivered: " + failure.getMessage());
+        disconnect();
+    }
     /**
      * Turns on hostname verification, which SSLSocket does NOT do by default.
      *
@@ -235,125 +238,142 @@ public class SimpleIrcClient {
         sslSocket.setSSLParameters(params);
     }
 
-    /** Opens the TLS socket without handshaking, so the caller can attribute each phase. */
-    private SSLSocket openSecureSocket() throws IOException {
-        SSLSocketFactory factory = (SSLSocketFactory) SSLSocketFactory.getDefault();
-        // Created with the hostname rather than an InetAddress: SNI and hostname verification
-        // both need the name we dialled, and an InetAddress would strip it.
-        SSLSocket sslSocket = (SSLSocket) factory.createSocket(host, port);
-        applyTlsSettings(sslSocket);
-        sslSocket.setSoTimeout(READ_TIMEOUT_MS);
-        return sslSocket;
-    }
+    public void disconnect() { disconnect(""); }
 
-    public void disconnect() {
-        disconnect("");
-    }
+    public void onDisconnected(Runnable action) { closedFuture.thenRun(action); }
 
-    public void disconnect(String reason) {
-        if (shuttingDown || !connected) return;
-
+    public synchronized void disconnect(String reason) {
+        if (shuttingDown) return;
         shuttingDown = true;
-        try {
-            if (writer != null) {
-                try {
-                    sendRawLine("QUIT :" + (reason.isEmpty() ? "Disconnecting" : reason));
-                    writer.flush();
-                    writer.close();
-                } catch (IOException ignored) {
-                }
-            }
-            if (reader != null) try {
-                reader.close();
-            } catch (IOException ignored) {
-            }
-            if (socket != null) try {
-                socket.close();
-            } catch (IOException ignored) {
-            }
-        } finally {
-            activeBatches.clear();
-            activeBatchChannels.clear();
-            connected = false;
-            List<String> joined = new ArrayList<>(channels);
-            channelUserList.clear();
-            synchronized (channelListAccumulator) {
-                channelListAccumulator.clear();
-                channelListRunActive = false;
-            }
-            channelListTruncated = false;
-            for (String joinedChannel : joined) {
-                fireUsersChanged(joinedChannel);
-            }
-            fireEvent(new IrcEvent(IrcEvent.Type.DISCONNECT, null, null, disconnectReason, null));
+        registered = false;
+        pendingCommands.clear();
+        output.discardCommands();
+        if (reason != null && !reason.isEmpty()) recordDisconnectReason(reason);
+        // QUIT is best effort. A stalled write cannot delay cancellation beyond this deadline.
+        CLOSER.schedule(this::finishClose, 250, java.util.concurrent.TimeUnit.MILLISECONDS);
+        String quit = "QUIT :" + (reason == null || reason.isEmpty() ? "Disconnecting" : reason);
+        if (!connected || !validLine(quit) || !output.offer(quit, true, this::finishClose)) finishClose();
+    }
+
+    private synchronized void finishClose() {
+        if (closed) return;
+        closed = true;
+        if (registrationDeadline != null) registrationDeadline.cancel(false);
+        connected = false;
+        output.close();
+        // Close the underlying transport first: never acquire BufferedReader/Writer locks
+        // while another worker is blocked in a read or TLS write.
+        if (transport != null) try { transport.close(); } catch (IOException ignored) { }
+        executor.shutdownNow();
+        activeBatches.clear();
+        activeBatchChannels.clear();
+        List<String> joined = new ArrayList<>(channels);
+        channels.clear();
+        channelUserList.clear();
+        resetChannelListRun();
+        for (String channel : joined) fireUsersChanged(channel);
+        fireEvent(new IrcEvent(IrcEvent.Type.DISCONNECT, null, null, disconnectReason, String.join(",", joined)));
+        closedFuture.complete(null);
+    }
+
+    public synchronized Set<String> getChannels() {
+        return Collections.unmodifiableSet(new HashSet<>(channels));
+    }
+
+    public boolean isRegistered() { return registered && !shuttingDown; }
+
+    public synchronized boolean sameName(String a, String b) {
+        return a != null && b != null && modeSpec.fold(a).equals(modeSpec.fold(b));
+    }
+
+    public static boolean isChannel(String name) {
+        return name != null && !name.isEmpty() && "#&+!".indexOf(name.charAt(0)) >= 0;
+    }
+
+    public synchronized Map<String, String> getDesiredChannels() {
+        return Collections.unmodifiableMap(new java.util.LinkedHashMap<>(desiredChannels));
+    }
+
+    public synchronized void joinChannel(String channel, String password) {
+        if (!isChannel(channel) || channel.matches(".*[\\s,\\x00].*")) {
+            commandError("Invalid channel name: " + channel);
+            return;
         }
-    }
-
-    public void joinChannel(String channel, String password) {
-        if (connected) {
-            String command = "JOIN " + channel;
-            if (password != null && !password.isEmpty()) {
-                command += " " + password;
-            }
-            sendRawLine(command);
-            channels.add(channel);
-
+        desiredChannels.keySet().removeIf(name -> sameName(name, channel));
+        desiredChannels.put(channel, password == null ? "" : password);
+        if (shuttingDown) {
+            commandError("Channel saved for reconnect; currently disconnected.");
+            return;
         }
+        if (registered) sendJoin(channel);
+        // Registration drains the desired map once, so part-before-welcome cancels the join.
     }
 
-    public void leaveChannel(String channel) {
-        leaveChannel(channel, null);
+    private void sendJoin(String channel) {
+        String password = desiredChannels.get(channel);
+        sendCommand("JOIN " + channel + (password == null || password.isEmpty() ? "" : " " + password), null);
     }
 
-    public void leaveChannel(String channel, String reason) {
-        if (connected && channels.contains(channel)) {
-            String command = "PART " + channel;
-            if (reason != null && !reason.isEmpty()) {
-                command += " :" + reason;
-            }
-            sendRawLine(command);
-            channels.remove(channel);
-            channelUserList.removeChannel(channel);
-            fireUsersChanged(channel);
-        }
+    public void leaveChannel(String channel) { leaveChannel(channel, null); }
+
+    public synchronized void leaveChannel(String channel, String reason) {
+        desiredChannels.keySet().removeIf(name -> sameName(name, channel));
+        if (registered) sendCommand("PART " + channel + (reason == null || reason.isEmpty() ? "" : " :" + reason), null);
     }
 
-    public void sendMessage(String target, String message) {
-        if (connected) {
-            sendRawLine("PRIVMSG " + target + " :" + message);
-        }
+    public void sendMessage(String target, String message) { sendMessage(target, message, null); }
+    public boolean sendMessage(String target, String message, Runnable sent) {
+        return sendCommand("PRIVMSG " + target + " :" + message, sent);
     }
-
-    public void sendAction(String target, String action) {
-        if (connected) {
-            sendRawLine("PRIVMSG " + target + " :\u0001ACTION " + action + "\u0001");
-        }
+    public void sendAction(String target, String action) { sendAction(target, action, null); }
+    public boolean sendAction(String target, String action, Runnable sent) {
+        return sendCommand("PRIVMSG " + target + " :\u0001ACTION " + action + "\u0001", sent);
     }
-
-    public void sendNotice(String target, String message) {
-        if (connected) {
-            sendRawLine("NOTICE " + target + " :" + message);
-        }
+    public void sendNotice(String target, String message) { sendNotice(target, message, null); }
+    public boolean sendNotice(String target, String message, Runnable sent) {
+        return sendCommand("NOTICE " + target + " :" + message, sent);
     }
-
     public void setNick(String newNick) {
-        if (connected) {
-            sendRawLine("NICK " + newNick);
-        }
+        // The server is authoritative; a rejected request must not change nick.
+        sendCommand("NICK " + newNick, null);
     }
 
+    public synchronized boolean sendCommand(String line, Runnable sent) {
+        if (!isRegistered()) {
+            commandError("Not registered with IRC; command was not sent.");
+            return false;
+        }
+        return enqueue(line, false, sent);
+    }
+
+    /** Internal registration/keepalive traffic bypasses the paced command queue. */
     public synchronized void sendRawLine(String line) {
-        if (rawLogging) log.info("IRC >> {}", redactForLog(line));
-        if (writer == null) return;
-        try {
-            writer.write(line + "\r\n");
-            writer.flush();
-        } catch (IOException e) {
-            log.error("Error sending IRC message", e);
-        }
+        if (!shuttingDown) enqueue(line, true, null);
     }
 
-    void processLine(String line) {
+    private boolean enqueue(String line, boolean urgent, Runnable sent) {
+        if (!validLine(line)) {
+            commandError("Command rejected: use one line of at most 510 UTF-8 bytes.");
+            return false;
+        }
+        if (!output.offer(line, urgent, sent)) {
+            commandError("IRC output queue is full or closed; command was not sent.");
+            if (urgent) disconnect("Protocol output queue exhausted");
+            return false;
+        }
+        return true;
+    }
+
+    private static boolean validLine(String line) {
+        return line != null && !line.isEmpty() && line.indexOf('\r') < 0 && line.indexOf('\n') < 0
+                && line.indexOf('\0') < 0 && line.getBytes(StandardCharsets.UTF_8).length <= 510;
+    }
+
+    private void commandError(String text) {
+        fireEvent(new IrcEvent(IrcEvent.Type.SERVER_ERROR, null, null, text, null));
+    }
+    synchronized void processLine(String line) {
+        if (shuttingDown) return;
         if (rawLogging) log.info("IRC << {}", redactForLog(line));
 
         // Reset per-line tag state
@@ -402,7 +422,7 @@ public class SimpleIrcClient {
             }
 
             if (command.equals("PING")) {
-                sendRawLine("PONG " + (params.isEmpty() ? "" : params.get(0)));
+                sendRawLine("PONG :" + (params.isEmpty() ? "" : params.get(params.size() - 1)));
                 return;
             }
 
@@ -416,10 +436,11 @@ public class SimpleIrcClient {
         // IRCv3 batch intercept: accumulate tagged messages instead of processing normally
         if (currentTagBatch != null && activeBatches.containsKey(currentTagBatch)) {
             String batchRef = currentTagBatch;
+            if (activeBatches.get(batchRef).size() >= 1000) return;
             if (command.equalsIgnoreCase("PRIVMSG") && params.size() >= 2) {
                 String target = params.get(0);
                 String msgBody = params.get(1);
-                if (msgBody.startsWith("\u0001") && msgBody.endsWith("\u0001")) {
+                if (msgBody.length() >= 2 && msgBody.startsWith("\u0001") && msgBody.endsWith("\u0001")) {
                     // CTCP — check for ACTION
                     String ctcp = msgBody.substring(1, msgBody.length() - 1);
                     String[] parts = ctcp.split(" ", 2);
@@ -446,10 +467,10 @@ public class SimpleIrcClient {
                     String target = params.get(0);
                     String message = params.get(1);
 
-                    if (message.startsWith("\u0001") && message.endsWith("\u0001")) {
+                    if (message.length() >= 2 && message.startsWith("\u0001") && message.endsWith("\u0001")) {
                         handleCtcp(source, target, message);
                     } else {
-                        String messageChannel = target.startsWith("#") ? target : sourceNick;
+                        String messageChannel = isChannel(target) ? target : sourceNick;
                         fireEvent(new IrcEvent(IrcEvent.Type.MESSAGE, sourceNick, messageChannel, message, null));
                     }
                 }
@@ -458,11 +479,12 @@ public class SimpleIrcClient {
             case "JOIN":
                 if (!params.isEmpty()) {
                     String channel = params.get(0);
+                    if (sameName(sourceNick, nick)) channels.add(channel);
                     fireEvent(new IrcEvent(IrcEvent.Type.JOIN, sourceNick, channel, null, null));
                     channelUserList.join(channel, sourceNick);
                     fireUsersChanged(channel);
-                    if (sourceNick.equals(nick) && capHistorySupported) {
-                        sendRawLine("CHATHISTORY LATEST " + channel + " * 100");
+                    if (sameName(sourceNick, nick) && capHistorySupported) {
+                        sendCommand("CHATHISTORY LATEST " + channel + " * 100", null);
                     }
                 }
                 break;
@@ -472,11 +494,12 @@ public class SimpleIrcClient {
                     String channel = params.get(0);
                     String reason = params.size() > 1 ? params.get(1) : "";
 
-                    if (!sourceNick.equals(nick)) {
+                    if (!sameName(sourceNick, nick)) {
                         fireEvent(new IrcEvent(IrcEvent.Type.PART, sourceNick, channel, reason, null));
                         channelUserList.part(channel, sourceNick);
                         fireUsersChanged(channel);
                     } else {
+                        channels.removeIf(joined -> sameName(joined, channel));
                         channelUserList.removeChannel(channel);
                         fireUsersChanged(channel);
                     }
@@ -496,8 +519,9 @@ public class SimpleIrcClient {
             case "NICK":
                 if (!params.isEmpty()) {
                     String newNick = params.get(0);
-                    if (sourceNick.equals(this.nick)) {
+                    if (sameName(sourceNick, this.nick)) {
                         this.nick = newNick;
+                        confirmedNick = newNick;
                     }
 
                     userChannels = channelUserList.rename(sourceNick, newNick);
@@ -515,10 +539,11 @@ public class SimpleIrcClient {
                     String kickMessage = params.size() > 2 ? params.get(2) : "";
 
                     fireEvent(new IrcEvent(IrcEvent.Type.KICK, sourceNick, channel, kickedUser + " " + kickMessage, null));
-                    if (!kickedUser.equals(nick)) {
+                    if (!sameName(kickedUser, nick)) {
                         channelUserList.kick(channel, kickedUser);
                         fireUsersChanged(channel);
                     } else {
+                        channels.removeIf(joined -> sameName(joined, channel));
                         channelUserList.removeChannel(channel);
                         fireUsersChanged(channel);
                     }
@@ -545,7 +570,7 @@ public class SimpleIrcClient {
                         modeString.append(" ").append(params.get(i));
                     }
 
-                    if (target.startsWith("#")) {
+                    if (isChannel(target)) {
                         fireEvent(new IrcEvent(IrcEvent.Type.CHANNEL_MODE, "* " + sourceNick + " sets mode(s)", target, modeString.toString().trim(), null));
                         channelUserList.applyModeChange(target, params.subList(1, params.size()));
                         fireUsersChanged(target);
@@ -565,13 +590,14 @@ public class SimpleIrcClient {
 
             case "KILL":
                 // Only our own KILL ends our link; another user's is not our disconnect.
-                if (params.isEmpty() || !params.get(0).equals(nick)) break;
+                if (params.isEmpty() || !sameName(params.get(0), nick)) break;
                 String killReason = params.size() >= 2 ? params.get(params.size() - 1) : "";
                 recordDisconnectReason("killed by " + sourceNick
                         + (killReason.isEmpty() ? "" : ": " + killReason));
                 fireEvent(new IrcEvent(IrcEvent.Type.ERROR, null, null,
                         "Killed by " + sourceNick
                                 + (killReason.isEmpty() ? "" : ": " + killReason), null));
+                disconnect();
                 break;
 
             case "ERROR":
@@ -583,12 +609,18 @@ public class SimpleIrcClient {
                 recordDisconnectReason(serverError);
                 fireEvent(new IrcEvent(IrcEvent.Type.ERROR, null, null,
                         "Server closed the link: " + serverError, null));
+                disconnect();
                 break;
 
             case "BATCH":
                 if (params.isEmpty()) break;
                 String batchToken = params.get(0);
                 if (batchToken.startsWith("+")) {
+                    if (activeBatches.size() >= 16) {
+                        commandError("Too many unfinished history batches; closing the connection.");
+                        disconnect();
+                        break;
+                    }
                     String ref = batchToken.substring(1);
                     // params = [+ref, type, channel]
                     String batchChannel = params.size() >= 3 ? params.get(2) : "";
@@ -666,7 +698,11 @@ public class SimpleIrcClient {
                 // Server replies "AUTHENTICATE +" when ready for the SASL PLAIN response.
                 if (saslEnabled && !params.isEmpty() && "+".equals(params.get(0))) {
                     String authcid = (saslAccount != null && !saslAccount.isEmpty()) ? saslAccount : nick;
-                    sendRawLine("AUTHENTICATE " + saslPlainResponse(authcid, saslPassword));
+                    String payload = saslPlainResponse(authcid, saslPassword);
+                    for (int offset = 0; offset < payload.length(); offset += 400) {
+                        sendRawLine("AUTHENTICATE " + payload.substring(offset, Math.min(offset + 400, payload.length())));
+                    }
+                    if (payload.length() % 400 == 0) sendRawLine("AUTHENTICATE +");
                 }
                 break;
 
@@ -688,14 +724,14 @@ public class SimpleIrcClient {
 
         switch (command) {
             case "ACTION":
-                String actionChannel = target.startsWith("#") ? target : sourceNick;
+                String actionChannel = isChannel(target) ? target : sourceNick;
                 fireEvent(new IrcEvent(IrcEvent.Type.ACTION, sourceNick, actionChannel, param, null));
                 break;
             case "VERSION":
-                sendRawLine("NOTICE " + sourceNick + " :\u0001VERSION RuneLite IRC Plugin\u0001");
+                sendCommand("NOTICE " + sourceNick + " :\u0001VERSION RuneLite IRC Plugin\u0001", null);
                 break;
             case "PING":
-                sendRawLine("NOTICE " + sourceNick + " :\u0001PING " + param + "\u0001");
+                sendCommand("NOTICE " + sourceNick + " :\u0001PING " + param + "\u0001", null);
                 break;
         }
     }
@@ -708,6 +744,7 @@ public class SimpleIrcClient {
                 // the server does not echo a NICK during registration.
                 if (!params.isEmpty()) {
                     nick = params.get(0);
+                    confirmedNick = nick;
                 }
                 connected = true;
                 connectPhase = ConnectPhase.ESTABLISHED;
@@ -716,6 +753,7 @@ public class SimpleIrcClient {
             case 5: // RPL_ISUPPORT
                 if (params.size() >= 2) {
                     modeSpec.applyIsupport(params.subList(1, params.size()));
+                    channelUserList.reindex();
                 }
                 break;
             case 263: // RPL_TRYAGAIN: only a throttled LIST concerns us here.
@@ -735,7 +773,7 @@ public class SimpleIrcClient {
                     fireEvent(new IrcEvent(IrcEvent.Type.WHOIS_REPLY, "System", params.get(1), String.format("%s is away: %s", params.get(1), params.get(2)), null));
                 break;
             case 311:
-                if (params.size() >= 5)
+                if (params.size() >= 6)
                     fireEvent(new IrcEvent(IrcEvent.Type.WHOIS_REPLY, "System", params.get(1), String.format("%s is %s@%s (%s)", params.get(1), params.get(2), params.get(3), params.get(5)), null));
                 break;
             case 312:
@@ -843,12 +881,29 @@ public class SimpleIrcClient {
                     fireUsersChanged(channel);
                 }
                 break;
+            case 431:
+                commandError("Server error 431: a nickname is required.");
+                if (!registered) disconnect("Registration failed: choose a nickname and reconnect");
+                break;
+            case 432:
             case 433:
-                if (params.size() >= 2)
-                    fireEvent(new IrcEvent(IrcEvent.Type.NICK_IN_USE, null, null, params.get(1), null));
+            case 436:
+            case 437:
+                String rejected = params.size() >= 2 ? params.get(1) : requestedNick;
+                String detail = params.size() >= 3 ? params.get(params.size() - 1) : "Nickname rejected";
+                if (numeric == 433 && !registered && nickRetries < 5) {
+                    String suffix = "_" + (++nickRetries);
+                    requestedNick = nick.substring(0,
+                            Math.min(nick.length(), Math.max(1, modeSpec.nickLength() - suffix.length()))) + suffix;
+                    commandError("Nickname " + rejected + " is in use. Trying " + requestedNick + ".");
+                    sendRawLine("NICK " + requestedNick);
+                } else {
+                    commandError("Server error " + numeric + " for " + rejected + ": " + detail);
+                    if (!registered) disconnect("Registration failed: choose another nickname and reconnect");
+                }
                 break;
             case 475:
-                if (params.size() >= 2)
+                if (params.size() >= 3)
                     fireEvent(new IrcEvent(IrcEvent.Type.BAD_CHANNEL_KEY, null, params.get(1), params.get(2), null));
                 break;
             case 903: // RPL_SASLSUCCESS
@@ -879,10 +934,13 @@ public class SimpleIrcClient {
                 // needs - "you are banned", "reconnecting too fast", "erroneous nickname" - so
                 // report it verbatim rather than enumerating every numeric a server might send.
                 if (numeric >= 400 && numeric <= 599 && params.size() >= 2) {
-                    String errorText = params.get(params.size() - 1);
+                    String errorText = String.join(" ", params.subList(1, params.size()));
                     if (errorText != null && !errorText.isEmpty()) {
                         fireEvent(new IrcEvent(IrcEvent.Type.SERVER_ERROR, null, null,
                                 "Server error " + numeric + ": " + errorText, null));
+                        if (!registered && (numeric == 463 || numeric == 464 || numeric == 465)) {
+                            disconnect("Registration rejected: " + errorText);
+                        }
                     }
                 }
                 break;
@@ -893,7 +951,7 @@ public class SimpleIrcClient {
      * Records the first reason seen for a teardown. First writer wins: a server ERROR explains a
      * drop better than the EOF that follows it a moment later.
      */
-    private void recordDisconnectReason(String reason) {
+    private synchronized void recordDisconnectReason(String reason) {
         if (reason == null || reason.isEmpty()) return;
         if (disconnectReason == null) disconnectReason = reason;
     }
@@ -997,8 +1055,9 @@ public class SimpleIrcClient {
             return "DNS lookup failed: " + host + " could not be resolved (" + type + ")";
         }
         if (e instanceof SocketTimeoutException) {
-            return "Timed out " + phase.description + " " + where + " - no data for "
-                    + (READ_TIMEOUT_MS / 1000) + "s (" + type + ")";
+            int seconds = phase == ConnectPhase.CONNECTING || phase == ConnectPhase.TLS_HANDSHAKE
+                    ? 15 : READ_TIMEOUT_MS / 1000;
+            return "Timed out " + phase.description + " " + where + " after " + seconds + "s (" + type + ")";
         }
         return "Failed while " + phase.description + " " + where + " - " + type
                 + (detail == null || detail.isEmpty() ? "" : ": " + detail);
@@ -1028,7 +1087,7 @@ public class SimpleIrcClient {
     }
 
     /** Current roster for a channel, sorted by rank then nick. Empty when unknown. */
-    List<ChannelUserList.Entry> getChannelUsers(String channel) {
+    synchronized List<ChannelUserList.Entry> getChannelUsers(String channel) {
         return channelUserList.snapshot(channel);
     }
 
@@ -1058,15 +1117,7 @@ public class SimpleIrcClient {
         channelListTruncated = false;
     }
 
-    /**
-     * True once the socket is open and the NICK/USER/CAP handshake has been written, and until
-     * the connection drops.
-     *
-     * This is deliberately NOT "registered": the flag is set as soon as those lines go out, well
-     * before the server answers RPL_WELCOME (which only re-affirms it). A command sent in between
-     * - the gap is sub-second on a fast connection but several seconds with SASL - reaches the
-     * server and may come back as 451 ERR_NOTREGISTERED.
-     */
+    /** Transport is open; use isRegistered() to determine whether commands are allowed. */
     public boolean isConnected() {
         return connected;
     }
@@ -1076,32 +1127,35 @@ public class SimpleIrcClient {
         fireEvent(new IrcEvent(IrcEvent.Type.USERS_CHANGED, null, channel, null, null));
     }
 
-    private final List<Runnable> pendingCommands = new CopyOnWriteArrayList<>();
+    private final List<Runnable> pendingCommands = new ArrayList<>();
 
-    /**
-     * Queue a command to be executed once fully registered with the server
-     */
-    public void executeWhenRegistered(Runnable command) {
-        if (connected) {
+    public synchronized void executeWhenRegistered(Runnable command) {
+        if (shuttingDown) {
+            commandError("Disconnected; reconnect before joining channels.");
+        } else if (registered) {
             command.run();
-        } else {
+        } else if (pendingCommands.size() < 128) {
             pendingCommands.add(command);
+        } else {
+            commandError("Too many pending commands; wait for registration.");
         }
     }
 
     private void fireEvent(IrcEvent event) {
         if (event.getType() == IrcEvent.Type.REGISTERED) {
-            for (Runnable command : pendingCommands) {
-                command.run();
-            }
+            if (registered) return;
+            registered = true;
+            if (registrationDeadline != null) registrationDeadline.cancel(false);
+            for (String channel : new ArrayList<>(desiredChannels.keySet())) sendJoin(channel);
+            List<Runnable> ready = new ArrayList<>(pendingCommands);
             pendingCommands.clear();
+            for (Runnable command : ready) command.run();
         }
-
         for (IrcEventListener listener : listeners) {
-            listener.onEvent(event);
+            try { listener.onEvent(event); }
+            catch (RuntimeException e) { log.warn("IRC event listener failed", e); }
         }
     }
-
     public interface IrcEventListener {
         void onEvent(IrcEvent event);
     }

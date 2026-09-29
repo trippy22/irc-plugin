@@ -67,6 +67,21 @@ public class IrcPanel extends PluginPanel {
 
     public final Map<String, Boolean> unreadMessages = new LinkedHashMap<>();
     private String focusedChannel;
+    private volatile BufferSnapshot bufferSnapshot = new BufferSnapshot(
+            Collections.emptyList(), "System", Collections.emptyMap());
+
+    static final class BufferSnapshot {
+        final List<String> channels;
+        final String selected;
+        final Map<String, Boolean> unread;
+        BufferSnapshot(List<String> channels, String selected, Map<String, Boolean> unread) {
+            this.channels = Collections.unmodifiableList(new ArrayList<>(channels));
+            this.selected = selected;
+            this.unread = Collections.unmodifiableMap(new LinkedHashMap<>(unread));
+        }
+    }
+
+    BufferSnapshot getBufferSnapshot() { return bufferSnapshot; }
     private static final String SYSTEM_TAB = "System";
 
     private final JComboBox<String> bufferDropdown = getBufferComboBox();
@@ -354,7 +369,7 @@ public class IrcPanel extends PluginPanel {
 
     /** Pushes a fresh roster in. Only redraws when it is for the buffer currently on screen. */
     public void setChannelUsers(String channel, List<ChannelUserList.Entry> entries) {
-        channelUserSnapshots.put(channel, entries);
+        if (entries.equals(channelUserSnapshots.put(channel, entries))) return;
         // equalsIgnoreCase, not equals: the channel name here comes from a server numeric and the
         // tab title from a JOIN echo, which need not agree on casing.
         if (tabbedPane != null && channel.equalsIgnoreCase(getCurrentChannel())) {
@@ -505,6 +520,7 @@ public class IrcPanel extends PluginPanel {
     }
 
     public String getCurrentChannel() {
+        if (!SwingUtilities.isEventDispatchThread()) return bufferSnapshot.selected;
         int index = tabbedPane.getSelectedIndex();
         return index != -1 ? tabbedPane.getTitleAt(index) : "System";
     }
@@ -620,6 +636,7 @@ public class IrcPanel extends PluginPanel {
     }
 
     private void refreshDesktopChannels() {
+        bufferSnapshot = new BufferSnapshot(getChannelNames(), getCurrentChannel(), unreadMessages);
         if (desktopLayout != null) desktopLayout.updateChannels(getChannelNames(), getCurrentChannel());
     }
 
@@ -748,7 +765,7 @@ public class IrcPanel extends PluginPanel {
         if (channel == null || channel.trim().isEmpty()) return;
 
         String password = JOptionPane.showInputDialog(chatContent, "Enter channel password (optional):");
-        if (!channel.startsWith("#")) {
+        if (!SimpleIrcClient.isChannel(channel)) {
             channel = "#" + channel;
         }
         if (onChannelJoin != null) {
@@ -847,6 +864,7 @@ public class IrcPanel extends PluginPanel {
     public static class ChannelPane extends JTextPane {
         private final IrcConfig config;
         private ArrayList<String> messageLog;
+        private boolean renderPending;
         private static final Pattern UNDERLINE = Pattern.compile("\u001F([^\u001F\u000F]+)[\u001F\u000F]?");
         private static final Pattern ITALIC = Pattern.compile("\u001D([^\u001D\u000F]+)[\u001D\u000F]?");
         private static final Pattern BOLD = Pattern.compile("\u0002([^\u0002\u000F]+)[\u0002\u000F]?");
@@ -892,9 +910,17 @@ public class IrcPanel extends PluginPanel {
             if (messageLog.size() > config.getMaxScrollback()) {
                 messageLog.remove(0);
             }
+            if (renderPending) return;
+            renderPending = true;
             SwingUtilities.invokeLater(() -> {
+                renderPending = false;
+                JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+                JScrollBar bar = scroll == null ? null : scroll.getVerticalScrollBar();
+                boolean follow = bar == null || bar.getValue() + bar.getVisibleAmount() >= bar.getMaximum() - 8;
+                Point position = scroll == null ? null : scroll.getViewport().getViewPosition();
                 setText("<html><body style='color:" + ColorUtil.toHexColor(ColorScheme.TEXT_COLOR) + ";'>" + String.join("", messageLog) + "</body></html>");
-                setCaretPosition(getDocument().getLength());
+                if (follow) setCaretPosition(getDocument().getLength());
+                else scroll.getViewport().setViewPosition(position);
             });
         }
 

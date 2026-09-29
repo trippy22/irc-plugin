@@ -27,6 +27,25 @@ class ModeSpec {
     private String typeA = "";
     private String typeB = "";
     private String typeC = "";
+    private volatile String caseMapping = "rfc1459";
+    private int nickLength = 9;
+
+    String fold(String name) {
+        StringBuilder folded = new StringBuilder(name.length());
+        for (char c : name.toCharArray()) {
+            if (c >= 'A' && c <= 'Z') c += 32;
+            if (!"ascii".equals(caseMapping)) {
+                if (c == '[') c = '{';
+                else if (c == ']') c = '}';
+                else if (c == '\\') c = '|';
+                else if (c == '^' && "rfc1459".equals(caseMapping)) c = '~';
+            }
+            folded.append(c);
+        }
+        return folded.toString();
+    }
+
+    int nickLength() { return nickLength; }
 
     static ModeSpec defaults() {
         ModeSpec spec = new ModeSpec();
@@ -57,6 +76,12 @@ class ModeSpec {
                 parsePrefix(value);
             } else if ("CHANMODES".equals(key)) {
                 parseChanmodes(value);
+            } else if ("CASEMAPPING".equals(key)
+                    && ("ascii".equals(value) || "rfc1459".equals(value) || "strict-rfc1459".equals(value))) {
+                caseMapping = value;
+            } else if ("NICKLEN".equals(key)) {
+                try { nickLength = Math.max(3, Math.min(100, Integer.parseInt(value))); }
+                catch (NumberFormatException ignored) { }
             }
         }
     }
