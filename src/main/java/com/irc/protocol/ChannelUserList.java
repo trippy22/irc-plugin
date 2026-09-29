@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.protocol;
 
 import lombok.Value;
 
@@ -21,11 +21,11 @@ import java.util.Set;
  * Channels and nicks are keyed by their ASCII-lowercased form because IRC treats them
  * case-insensitively, but the server's casing is preserved for display.
  */
-class ChannelUserList {
+public class ChannelUserList {
 
     /** One user as the UI should draw them: display nick, highest prefix, and that prefix's rank. */
     @Value
-    static class Entry {
+    public static class Entry {
         String nick;
         String prefix;
         int rank;

@@ -1,4 +1,11 @@
-package com.irc;
+package com.irc.session;
+
+import com.irc.IrcConfig;
+import com.irc.model.IrcMessage;
+import com.irc.protocol.ChannelListEntry;
+import com.irc.protocol.ChannelUserList;
+import com.irc.protocol.SimpleIrcClient;
+import com.irc.ui.IrcPanel;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;

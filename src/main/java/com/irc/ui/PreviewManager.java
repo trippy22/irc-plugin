@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.ui;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;

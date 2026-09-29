@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.model;
 
 import lombok.Value;
 import java.time.Instant;
@@ -11,7 +11,7 @@ public class IrcMessage {
     MessageType type;
     Instant timestamp;
 
-    enum MessageType {
+    public enum MessageType {
         CHAT, SYSTEM, JOIN, PART, QUIT, NICK_CHANGE, PRIVATE, NOTICE, KICK, TOPIC, MODE,
         HISTORY, HISTORY_SEPARATOR
     }

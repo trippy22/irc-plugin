@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.ui;
 
 import javax.swing.JFrame;
 import javax.swing.JPanel;

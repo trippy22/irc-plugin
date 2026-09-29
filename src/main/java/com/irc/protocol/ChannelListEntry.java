@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.protocol;
 
 import lombok.Getter;
 

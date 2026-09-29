@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.protocol;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -1028,17 +1028,17 @@ public class SimpleIrcClient {
     }
 
     /** Current roster for a channel, sorted by rank then nick. Empty when unknown. */
-    List<ChannelUserList.Entry> getChannelUsers(String channel) {
+    public List<ChannelUserList.Entry> getChannelUsers(String channel) {
         return channelUserList.snapshot(channel);
     }
 
     /** The last completed channel list. Immutable; empty until a LIST finishes. */
-    List<ChannelListEntry> getChannelListSnapshot() {
+    public List<ChannelListEntry> getChannelListSnapshot() {
         return channelListSnapshot;
     }
 
     /** True when the last LIST hit CHANNEL_LIST_CAP and rows were dropped. */
-    boolean isChannelListTruncated() {
+    public boolean isChannelListTruncated() {
         return channelListTruncated;
     }
 
@@ -1050,7 +1050,7 @@ public class SimpleIrcClient {
      * list should survive until a new one completes, so Refresh does not blank the dialog
      * mid-flight.
      */
-    void resetChannelListRun() {
+    public void resetChannelListRun() {
         synchronized (channelListAccumulator) {
             channelListAccumulator.clear();
             channelListRunActive = false;

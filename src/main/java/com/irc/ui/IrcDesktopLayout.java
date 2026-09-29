@@ -1,4 +1,6 @@
-package com.irc;
+package com.irc.ui;
+
+import com.irc.protocol.ChannelUserList;
 
 import javax.swing.*;
 import javax.swing.tree.DefaultMutableTreeNode;

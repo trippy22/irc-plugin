@@ -1,4 +1,7 @@
-package com.irc;
+package com.irc.ui;
+
+import com.irc.protocol.ChannelListEntry;
+import com.irc.protocol.IrcFormatting;
 
 import javax.swing.table.AbstractTableModel;
 import java.util.ArrayList;

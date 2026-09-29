@@ -1,4 +1,10 @@
-package com.irc;
+package com.irc.ui;
+
+import com.irc.IrcConfig;
+import com.irc.model.IrcMessage;
+import com.irc.protocol.ChannelListEntry;
+import com.irc.protocol.ChannelUserList;
+import com.irc.protocol.IrcFormatting;
 
 import com.google.inject.Provides;
 import com.irc.emoji.EmojiParser;
@@ -160,7 +166,7 @@ public class IrcPanel extends PluginPanel {
         JButton popOutButton = new JButton("^");
         popOutButton.setToolTipText("Pop out window");
         try {
-            Image img = ImageUtil.loadImageResource(getClass(), "reload.png");
+            Image img = ImageUtil.loadImageResource(getClass(), "/com/irc/reload.png");
             reloadButton.setIcon(new ImageIcon(img));
         } catch (Exception ignored) {
             reloadButton.setText("R");
@@ -445,7 +451,7 @@ public class IrcPanel extends PluginPanel {
     public NavigationButton generateNavigationButton() {
         navigationButton = NavigationButton.builder()
                 .tooltip("IRC")
-                .icon(ImageUtil.loadImageResource(getClass(), "icon.png"))
+                .icon(ImageUtil.loadImageResource(getClass(), "/com/irc/icon.png"))
                 .priority(config.getPanelPriority())
                 .panel(this)
                 .build();

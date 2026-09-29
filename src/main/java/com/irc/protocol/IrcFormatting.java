@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.protocol;
 
 import java.util.regex.Pattern;
 
@@ -6,7 +6,7 @@ import java.util.regex.Pattern;
  * IRC formatting control codes, shared by every surface that needs message text as plain text.
  *
  * The background group is {@code ,\d\d?}, not {@code ,\d\d}: a single-digit background is legal and
- * the renderer in {@link IrcPanel.ChannelPane} already parses it as one. Requiring two digits here
+ * the renderer in {@code ChannelPane} already parses it as one. Requiring two digits here
  * made the stripper disagree with the renderer and leave a stray ",5" in the output.
  *
  * Written with \xNN escapes rather than literal control characters so the source stays readable.

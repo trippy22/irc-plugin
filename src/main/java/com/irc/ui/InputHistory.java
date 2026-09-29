@@ -1,4 +1,4 @@
-package com.irc;
+package com.irc.ui;
 
 import java.util.ArrayList;
 import java.util.List;

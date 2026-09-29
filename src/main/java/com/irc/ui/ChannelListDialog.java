@@ -1,4 +1,6 @@
-package com.irc;
+package com.irc.ui;
+
+import com.irc.protocol.ChannelListEntry;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;

@@ -1,5 +1,11 @@
 package com.irc;
 
+import com.irc.model.IrcMessage;
+import com.irc.overlay.IrcOverlay;
+import com.irc.protocol.IrcFormatting;
+import com.irc.session.IrcAdapter;
+import com.irc.ui.IrcPanel;
+
 import com.google.inject.Provides;
 import com.irc.emoji.EmojiParser;
 import com.irc.emoji.EmojiService;

@@ -1,4 +1,7 @@
-package com.irc;
+package com.irc.overlay;
+
+import com.irc.IrcConfig;
+import com.irc.ui.IrcPanel;
 
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
