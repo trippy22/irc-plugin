@@ -1,5 +1,12 @@
 package com.irc;
 
+import com.irc.protocol.IrcFormatting;
+import com.irc.model.IrcMessage;
+import com.irc.overlay.IrcOverlay;
+import com.irc.ui.IrcPanel;
+import com.irc.session.IrcSessionController;
+import com.irc.protocol.SimpleIrcClient;
+
 import com.google.inject.Provides;
 import com.irc.emoji.EmojiParser;
 import com.irc.emoji.EmojiService;
@@ -437,7 +444,7 @@ public class IrcPlugin extends Plugin {
      * mean three underscores, and the server caps nick length. Returns "" when nothing usable is
      * left, so the caller can decline to send rather than sending a lone underscore.
      */
-    static String sanitizeNick(String nick) {
+    public static String sanitizeNick(String nick) {
         if (nick == null) {
             return "";
         }

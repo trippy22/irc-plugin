@@ -1,5 +1,32 @@
 # IRC state and presentation
 
+## Source map
+
+Start with `IrcPlugin` for RuneLite wiring, then follow commands through `session` to
+`protocol`, and delivered events through `model` to `ui` or `overlay`.
+
+| Package under `com.irc` | Responsibility | Starting points |
+| --- | --- | --- |
+| Root | RuneLite entry point and configuration | `IrcPlugin`, `IrcConfig` |
+| `protocol` | Custom IRC wire handling, output, server rules, roster bookkeeping and protocol values | `SimpleIrcClient`, `IrcLine`, `IrcOutput`, `ChannelUserList` |
+| `session` | Connection replacement, application commands and presentation event translation | `IrcSessionController`, `IrcAdapter` |
+| `model` | Shared conversation state and immutable messages/snapshots | `IrcChatModel`, `IrcMessage` |
+| `ui` | Swing sidebar, desktop window, dialogs, navigation and previews | `IrcPanel`, `IrcDesktopLayout`, `IrcWindowController` |
+| `overlay` | Rendering and keyboard integration inside the game | `IrcOverlay` |
+| `emoji` | Existing emoji parsing and data | `EmojiService`, `EmojiParser` |
+
+Tests mirror these packages. Wire parsing, output queues, mode bookkeeping and window
+implementation helpers remain package-private where possible. Public model snapshots
+expose immutable values; mutable conversation buffers remain private. The session
+controller exposes the commands needed by the plugin, while adapter observation and
+the controller's raw-client accessor remain internal to `session`.
+
+The package move preserves existing dependencies and ownership. In particular, the
+session layer still coordinates the panel, and the model still uses protocol naming
+and roster values. Further separation can be addressed with focused class extractions.
+The plugin entry point stays `com.irc.IrcPlugin`; icons retain their existing resource
+paths and are loaded with absolute classpath names.
+
 ```mermaid
 flowchart LR
     Input[Sidebar / popout actions] --> Controller[IrcSessionController]

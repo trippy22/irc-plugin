@@ -64,6 +64,17 @@ Detailed local results: `build/reports/tests/test/index.html` and
 `build/test-results/test/TEST-*.xml`. A desktop-layout image rendered by the test is
 `build/previews/irc-desktop.png`. `git diff --check` also passed.
 
+## Package organization follow-up
+
+The production classes and their tests were subsequently grouped into `protocol`,
+`session`, `model`, `ui`, and `overlay` packages, with the existing `emoji` package and
+RuneLite entry point retained. The same 41 tests passed again, with zero failures,
+errors, or skips, including the unchanged five baseline transcript fixtures and native
+Swing tests. Icon lookups now use their existing absolute classpath paths so moving
+the panel does not change resource resolution. Tests that need to inject incoming
+lines across package boundaries use a test-only helper, keeping the production parser
+entry point package-private.
+
 ## Scope
 
 No third-party IRC library or build dependency was added. Custom protocol handling and
