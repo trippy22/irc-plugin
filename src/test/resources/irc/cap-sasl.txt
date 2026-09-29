@@ -1,0 +1,29 @@
+INPUT :server CAP * LS * :sasl=PLAIN batch
+STATE Alice | null | false | []
+INPUT :server CAP * LS :server-time chathistory
+URGENT CAP REQ :chathistory batch server-time sasl
+STATE Alice | null | false | []
+INPUT :server CAP * ACK :sasl batch server-time chathistory
+URGENT AUTHENTICATE PLAIN
+STATE Alice | null | false | []
+INPUT AUTHENTICATE +
+URGENT AUTHENTICATE AEFsaWNlAHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw
+URGENT AUTHENTICATE +
+STATE Alice | null | false | []
+INPUT :server 903 Alice :SASL authentication successful
+URGENT CAP END
+EVENT SASL_SUCCESS | <null> | <null> | SASL authentication successful | <null>
+STATE Alice | null | false | []
+INPUT :server 001 Alice :Welcome
+EVENT REGISTERED | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+INPUT PING :keep alive
+URGENT PONG :keep alive
+STATE Alice | Alice | true | []
+INPUT :Alice!u@h JOIN #room
+EVENT CHANNEL_STATE | <null> | #room | JOINED | 
+EVENT JOIN | Alice | #room | <null> | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+COMMAND CHATHISTORY LATEST #room * 100
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice]

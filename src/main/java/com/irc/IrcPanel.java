@@ -43,7 +43,16 @@ public class IrcPanel extends PluginPanel {
     @Getter
     private final JPanel chatContent = new JPanel(new BorderLayout());
     private IrcPanelWindow panelWindow;
+    private IrcWindowController windowController;
     private JPanel controlPanel;
+    private final IrcChatModel model = new IrcChatModel();
+    private final Consumer<IrcChatModel.Snapshot> modelListener = this::renderModel;
+    private final Map<Long, JScrollPane> renderedConversations = new LinkedHashMap<>();
+    private final JLabel sessionStatus = new JLabel("Offline");
+    private final JPanel headerPanel = new JPanel(new BorderLayout());
+    private boolean renderingModel;
+
+    IrcChatModel getModel() { return model; }
     private IrcDesktopLayout desktopLayout;
     private boolean detachedLayout;
     private Timer flashTimer;
@@ -65,24 +74,13 @@ public class IrcPanel extends PluginPanel {
     private static final int CHANNEL_LIST_TIMEOUT_MS = 30000;
     private Font font;
 
-    public final Map<String, Boolean> unreadMessages = new LinkedHashMap<>();
-    private String focusedChannel;
     private static final String SYSTEM_TAB = "System";
 
     private final JComboBox<String> bufferDropdown = getBufferComboBox();
     private final InputHistory inputHistory = new InputHistory(20);
 
     private static final String USERS_HEADER_PREFIX = "Users (";
-    /**
-     * Rosters by channel, keyed case-insensitively: IRC channel names are case-insensitive, and a
-     * server that canonicalises casing differently between its JOIN echo and its 366 numeric would
-     * otherwise file the roster under a key this panel never looks up - the dropdown would simply
-     * never populate. Callers marshal to the EDT before calling {@link #setChannelUsers} - it
-     * mutates a Swing model synchronously - so the synchronized map is cheap defensive depth, not
-     * the primary thread-safety mechanism.
-     */
-    private final Map<String, List<ChannelUserList.Entry>> channelUserSnapshots =
-            Collections.synchronizedMap(new TreeMap<>(String.CASE_INSENSITIVE_ORDER));
+    /** Render cache only; the shared model owns the roster. */
     private List<ChannelUserList.Entry> displayedEntries = Collections.emptyList();
     private final JComboBox<String> nickDropdown = getNickComboBox();
 
@@ -110,9 +108,9 @@ public class IrcPanel extends PluginPanel {
             String currentTab = getCurrentChannel();
             for (int i = 0; i < tabbedPane.getTabCount(); i++) {
                 String tabTitle = tabbedPane.getTitleAt(i);
-                if (!SYSTEM_TAB.equals(tabTitle) && unreadMessages.getOrDefault(tabTitle, false) && !tabTitle.equals(currentTab)) {
+                if (!SYSTEM_TAB.equals(tabTitle) && isUnread(tabTitle) && !tabTitle.equals(currentTab)) {
                     tabbedPane.setForegroundAt(i, new Color(135, 206, 250)); // Change color for different flash
-                } else if (!SYSTEM_TAB.equals(tabTitle) && !unreadMessages.getOrDefault(tabTitle, false)) {
+                } else if (!SYSTEM_TAB.equals(tabTitle) && !isUnread(tabTitle)) {
                     tabbedPane.setForegroundAt(i, Color.white);
                 }
             }
@@ -193,39 +191,44 @@ public class IrcPanel extends PluginPanel {
         inputField.addActionListener(e -> {
             String message = inputField.getText();
             if (!message.isEmpty() && onMessageSend != null) {
-                onMessageSend.accept(getCurrentChannel(), message);
+                String conversation = getCurrentChannel();
+                model.draft(conversation, "");
                 inputHistory.add(message);
-                inputField.setText("");
+                onMessageSend.accept(conversation, message);
             }
         });
-        chatContent.add(controlPanel, BorderLayout.NORTH);
+        headerPanel.add(controlPanel, BorderLayout.CENTER);
+        sessionStatus.setName("ircSessionStatus");
+        sessionStatus.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+        headerPanel.add(sessionStatus, BorderLayout.NORTH);
+        chatContent.add(headerPanel, BorderLayout.NORTH);
         chatContent.add(tabbedPane, BorderLayout.CENTER);
         chatContent.add(inputField, BorderLayout.SOUTH);
         add(chatContent, BorderLayout.CENTER);
         panelWindow = new IrcPanelWindow(this, chatContent, this::prepareForHostChange,
                 this::hideAllPreviews, this::requestDock);
+        windowController = new IrcWindowController(this::renderHost, this::persistDock);
         navigationButton = generateNavigationButton();
-        SwingUtilities.invokeLater(() -> addChannel("System"));
+
         tabbedPane.addChangeListener(e -> onFocusedBufferChanged());
         initializeFlashTimer();
+        model.setHistoryLimit(config.getMaxScrollback());
+        model.listen(modelListener);
+        inputField.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            private void changed() { if (!renderingModel) model.draft(model.snapshot().selected, inputField.getText()); }
+            public void insertUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            public void removeUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+            public void changedUpdate(javax.swing.event.DocumentEvent e) { changed(); }
+        });
     }
 
     /** Runs when the focused buffer changes. Package-private so tests can drive it without the
      *  full initializeGui() Swing setup, which cannot run headless. */
     void onFocusedBufferChanged() {
-        String newChannel = getCurrentChannel();
-        focusedChannel = newChannel;
-        if (newChannel != null && unreadMessages.containsKey(newChannel)) {
-            unreadMessages.put(newChannel, false);
-            int selectedIndex = tabbedPane.getSelectedIndex();
-            if (selectedIndex != -1) {
-                tabbedPane.setForegroundAt(selectedIndex, Color.WHITE);
-            }
-        }
-        repopulateNickDropdown();
-        refreshDesktopChannels();
+        if (renderingModel) return;
+        int index = tabbedPane.getSelectedIndex();
+        if (index >= 0) model.select(tabbedPane.getTitleAt(index));
     }
-
     public void cycleChannel() {
         List<String> channels = this.getChannelNames();
         if (channels.isEmpty()) return;
@@ -354,14 +357,8 @@ public class IrcPanel extends PluginPanel {
 
     /** Pushes a fresh roster in. Only redraws when it is for the buffer currently on screen. */
     public void setChannelUsers(String channel, List<ChannelUserList.Entry> entries) {
-        channelUserSnapshots.put(channel, entries);
-        // equalsIgnoreCase, not equals: the channel name here comes from a server numeric and the
-        // tab title from a JOIN echo, which need not agree on casing.
-        if (tabbedPane != null && channel.equalsIgnoreCase(getCurrentChannel())) {
-            repopulateNickDropdown();
-        }
+        model.users(channel, entries);
     }
-
     /**
      * Rebuilds the dropdown for the focused buffer. Action listeners are detached for the
      * duration: this runs from inside the dropdown's own listener whenever selecting a nick
@@ -372,8 +369,9 @@ public class IrcPanel extends PluginPanel {
             return;
         }
         String channel = getCurrentChannel();
-        List<ChannelUserList.Entry> entries =
-                channelUserSnapshots.getOrDefault(channel, Collections.emptyList());
+        List<ChannelUserList.Entry> entries = model.snapshot().conversations.stream()
+                .filter(b -> model.sameName(b.name, channel)).map(b -> b.users).findFirst().orElse(Collections.emptyList());
+        if (entries.equals(displayedEntries) && desktopLayout == null) return;
         displayedEntries = entries;
         if (desktopLayout != null) desktopLayout.updateUsers(channel, entries);
 
@@ -388,7 +386,7 @@ public class IrcPanel extends PluginPanel {
                 nickDropdown.addItem(entry.getPrefix() + entry.getNick());
             }
             nickDropdown.setSelectedIndex(0);
-            nickDropdown.setEnabled(channel != null && channel.startsWith("#"));
+            nickDropdown.setEnabled(SimpleIrcClient.isChannel(channel));
         } finally {
             for (ActionListener listener : listeners) {
                 nickDropdown.addActionListener(listener);
@@ -404,7 +402,7 @@ public class IrcPanel extends PluginPanel {
             public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
                 JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
 
-                if (unreadMessages.getOrDefault(value.toString(), false)) {
+                if (isUnread(value.toString())) {
                     label.setForeground(new Color(135, 206, 250)); // Change color for different flash
                 } else {
                     label.setForeground(Color.white);
@@ -437,29 +435,8 @@ public class IrcPanel extends PluginPanel {
     }
 
     public void setFocusedChannel(String channel) {
-        if (channel != null && unreadMessages.containsKey(channel)) {
-            int i = 0;
-            int index = 0;
-            synchronized (channelPanes) {
-                for (Map.Entry<String, ChannelPane> entry : channelPanes.entrySet()) {
-                    if (entry.getKey().equals(channel)) {
-                        index = i;
-                        break;
-                    }
-                    i++;
-                }
-            }
-
-            unreadMessages.put(channel, false);
-            tabbedPane.setForegroundAt(index, Color.WHITE);
-            tabbedPane.setSelectedIndex(index);
-            bufferDropdown.setSelectedIndex(index);
-
-            this.focusedChannel = channel;
-            refreshDesktopChannels();
-        }
+        if (!renderingModel) model.select(channel);
     }
-
     private JComboBox<String> getStringFontComboBox() {
         String[] fonts = GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames();
         final JComboBox<String> fontComboBox = new JComboBox<>(fonts);
@@ -504,20 +481,16 @@ public class IrcPanel extends PluginPanel {
         this.onChannelListTimeout = channelListTimeoutCallback;
     }
 
-    public String getCurrentChannel() {
-        int index = tabbedPane.getSelectedIndex();
-        return index != -1 ? tabbedPane.getTitleAt(index) : "System";
-    }
+    public String getCurrentChannel() { return model.snapshot().selected; }
 
-    public void clearCurrentPane() {
-        int index = tabbedPane.getSelectedIndex();
-        String channel = index != -1 ? tabbedPane.getTitleAt(index) : "System";
-        ChannelPane pane = channelPanes.get(channel);
-        if (pane != null) {
-            pane.clear();
+    boolean isUnread(String name) {
+        for (IrcChatModel.Conversation conversation : model.snapshot().conversations) {
+            if (model.sameName(conversation.name, name)) return conversation.unread;
         }
+        return false;
     }
 
+    public void clearCurrentPane() { model.clear(getCurrentChannel()); }
     public boolean isPane(String name) {
         return tabbedPane.indexOfTab(name) != -1;
     }
@@ -569,6 +542,8 @@ public class IrcPanel extends PluginPanel {
      * repeatedly, and when nothing was ever armed or shown.
      */
     public void shutdown() {
+        model.unlisten(modelListener);
+        if (windowController != null) windowController.close();
         if (panelWindow != null) {
             panelWindow.shutdown();
             panelWindow = null;
@@ -586,11 +561,15 @@ public class IrcPanel extends PluginPanel {
     }
 
     public void setDetached(boolean detached, boolean alwaysOnTop) {
+        windowController.configure(detached, alwaysOnTop);
+    }
+
+    private void renderHost(boolean detached, boolean alwaysOnTop) {
         if (detachedLayout != detached) {
             if (detached) {
                 if (desktopLayout == null) {
                     desktopLayout = new IrcDesktopLayout(config.server().getHostname(),
-                            name -> unreadMessages.getOrDefault(name, false), this::setFocusedChannel,
+                            this::isUnread, this::setFocusedChannel,
                             nick -> {
                                 addChannel(nick);
                                 setFocusedChannel(nick);
@@ -601,14 +580,14 @@ public class IrcPanel extends PluginPanel {
                             () -> requestChannelList(""), () -> onReconnect.accept(true),
                             this::requestDock);
                 }
-                chatContent.remove(controlPanel);
+                headerPanel.remove(controlPanel);
                 desktopLayout.attachChat(tabbedPane, inputField);
                 chatContent.add(desktopLayout, BorderLayout.CENTER);
                 refreshDesktopChannels();
                 repopulateNickDropdown();
             } else {
                 chatContent.remove(desktopLayout);
-                chatContent.add(controlPanel, BorderLayout.NORTH);
+                headerPanel.add(controlPanel, BorderLayout.CENTER);
                 chatContent.add(tabbedPane, BorderLayout.CENTER);
                 chatContent.add(inputField, BorderLayout.SOUTH);
             }
@@ -623,7 +602,9 @@ public class IrcPanel extends PluginPanel {
         if (desktopLayout != null) desktopLayout.updateChannels(getChannelNames(), getCurrentChannel());
     }
 
-    private void requestDock() {
+    private void requestDock() { windowController.dock(); }
+
+    private void persistDock() {
         configManager.setConfiguration("irc", "popOut", false);
         IrcConfigUi.syncPopOutCheckbox(configManager.getConfigDescriptor(config), false);
     }
@@ -662,48 +643,71 @@ public class IrcPanel extends PluginPanel {
     }
 
     public void addChannel(String channel) {
-        if (channelPanes.containsKey(channel)) return;
-        ChannelPane pane = new ChannelPane(font, config, okHttpClient);
-        bufferDropdown.addItem(channel);
-
-        JScrollPane scrollPane = new JScrollPane(pane);
-        scrollPane.getVerticalScrollBar().addAdjustmentListener(e -> pane.cancelPreviewManager());
-
-        channelPanes.put(channel, pane);
-        unreadMessages.put(channel, false);
-        tabbedPane.addTab(channel, new JScrollPane(pane));
-        if (config.autofocusOnNewTab() || channel.equals(config.channel()) || channelPanes.size() == 2) {
-            tabbedPane.setSelectedIndex(tabbedPane.getTabCount() - 1);
-            this.setFocusedChannel(channel);
-        }
-        refreshDesktopChannels();
+        boolean focus = config.autofocusOnNewTab() || model.sameName(channel, config.channel())
+                || model.snapshot().conversations.size() == 1;
+        model.open(channel, focus);
     }
 
-    public void removeChannel(String channel) {
-        if (!channelPanes.containsKey(channel) || channel.equals("System")) return;
-        int index = tabbedPane.indexOfTab(channel);
-        if (index == -1) return;
-        tabbedPane.removeTabAt(index);
-        channelPanes.remove(channel);
-        unreadMessages.remove(channel);
-        bufferDropdown.removeItem(channel);
-        channelUserSnapshots.remove(channel);
-        onFocusedBufferChanged();
-    }
+    public void removeChannel(String channel) { model.close(channel); }
 
     public void addMessage(IrcMessage message) {
-        ChannelPane pane = channelPanes.get(message.getChannel());
-        if (pane == null) {
-            addChannel(message.getChannel());
-            pane = channelPanes.get(message.getChannel());
-        }
-        if (!message.getChannel().equals(focusedChannel)) {
-            unreadMessages.put(message.getChannel(), true);
-        }
-        pane.appendMessage(message, config);
-        refreshDesktopChannels();
+        model.setHistoryLimit(config.getMaxScrollback());
+        model.append(message, config.autofocusOnNewTab() || model.snapshot().conversations.size() == 1);
     }
 
+    /** Widgets are projections. Recreating either host can reconstruct everything from this snapshot. */
+    private void renderModel(IrcChatModel.Snapshot state) {
+        if (tabbedPane == null) return;
+        renderingModel = true;
+        try {
+            List<String> names = new ArrayList<>();
+            for (IrcChatModel.Conversation b : state.conversations) names.add(b.name);
+            if (!names.equals(getChannelNames())) {
+                tabbedPane.removeAll();
+                bufferDropdown.removeAllItems();
+                channelPanes.clear();
+                Set<Long> ids = new HashSet<>();
+                for (IrcChatModel.Conversation b : state.conversations) {
+                    ids.add(b.id);
+                    JScrollPane scroll = renderedConversations.computeIfAbsent(b.id, ignored -> {
+                        ChannelPane pane = new ChannelPane(font, config, okHttpClient);
+                        JScrollPane view = new JScrollPane(pane);
+                        view.getVerticalScrollBar().addAdjustmentListener(e -> pane.cancelPreviewManager());
+                        return view;
+                    });
+                    channelPanes.put(b.name, (ChannelPane) scroll.getViewport().getView());
+                    tabbedPane.addTab(b.name, scroll);
+                    bufferDropdown.addItem(b.name);
+                }
+                renderedConversations.entrySet().removeIf(e -> {
+                    if (ids.contains(e.getKey())) return false;
+                    ((ChannelPane) e.getValue().getViewport().getView()).cancelPreviewManager();
+                    return true;
+                });
+            }
+            for (IrcChatModel.Conversation b : state.conversations) {
+                channelPanes.get(b.name).showMessages(b.messages);
+                if (model.sameName(b.name, state.selected)) {
+                    int index = tabbedPane.indexOfTab(b.name);
+                    tabbedPane.setSelectedIndex(index);
+                    bufferDropdown.setSelectedIndex(index);
+                    tabbedPane.setForegroundAt(index, Color.WHITE);
+                    if (!inputField.getText().equals(b.draft)) inputField.setText(b.draft);
+                    String status = label(state.connection) + (state.nick.isEmpty() ? "" : " · " + state.nick);
+                    if (b.membership != IrcChatModel.Membership.NONE) status += " | " + b.name + ": " + label(b.membership);
+                    sessionStatus.setText(status);
+                    sessionStatus.setToolTipText(b.detail.isEmpty() ? status : status + " — " + b.detail);
+                }
+            }
+            repopulateNickDropdown();
+            refreshDesktopChannels();
+        } finally { renderingModel = false; }
+    }
+
+    private static String label(Enum<?> state) {
+        String text = state.name().toLowerCase(Locale.ROOT);
+        return Character.toUpperCase(text.charAt(0)) + text.substring(1);
+    }
     /**
      * Gives a component the keyboard focus as soon as it is actually on screen.
      *
@@ -748,7 +752,7 @@ public class IrcPanel extends PluginPanel {
         if (channel == null || channel.trim().isEmpty()) return;
 
         String password = JOptionPane.showInputDialog(chatContent, "Enter channel password (optional):");
-        if (!channel.startsWith("#")) {
+        if (!SimpleIrcClient.isChannel(channel)) {
             channel = "#" + channel;
         }
         if (onChannelJoin != null) {
@@ -756,66 +760,7 @@ public class IrcPanel extends PluginPanel {
         }
     }
 
-    public void renameChannel(String oldName, String newName) {
-        if (!channelPanes.containsKey(oldName) || channelPanes.containsKey(newName)) {
-            return;
-        }
-        int index = tabbedPane.indexOfTab(oldName);
-        if (index == -1) {
-            return;
-        }
-        synchronized (channelPanes) {
-            renameKeyInPlace(channelPanes, oldName, newName);
-        }
-        renameKeyInPlace(unreadMessages, oldName, newName);
-        tabbedPane.setTitleAt(index, newName);
-        renameBufferDropdownItem(oldName, newName);
-        if (oldName.equals(focusedChannel)) {
-            focusedChannel = newName;
-        }
-        refreshDesktopChannels();
-    }
-
-    static <V> void renameKeyInPlace(Map<String, V> map, String oldKey, String newKey) {
-        if (!map.containsKey(oldKey) || map.containsKey(newKey)) {
-            return;
-        }
-        LinkedHashMap<String, V> rebuilt = new LinkedHashMap<>();
-        for (Map.Entry<String, V> entry : map.entrySet()) {
-            rebuilt.put(entry.getKey().equals(oldKey) ? newKey : entry.getKey(), entry.getValue());
-        }
-        map.clear();
-        map.putAll(rebuilt);
-    }
-
-    private void renameBufferDropdownItem(String oldName, String newName) {
-        int itemIndex = -1;
-        for (int i = 0; i < bufferDropdown.getItemCount(); i++) {
-            if (oldName.equals(bufferDropdown.getItemAt(i))) {
-                itemIndex = i;
-                break;
-            }
-        }
-        if (itemIndex == -1) {
-            return;
-        }
-        int selected = bufferDropdown.getSelectedIndex();
-        ActionListener[] listeners = bufferDropdown.getActionListeners();
-        for (ActionListener listener : listeners) {
-            bufferDropdown.removeActionListener(listener);
-        }
-        try {
-            bufferDropdown.removeItemAt(itemIndex);
-            bufferDropdown.insertItemAt(newName, itemIndex);
-            if (selected >= 0 && selected < bufferDropdown.getItemCount()) {
-                bufferDropdown.setSelectedIndex(selected);
-            }
-        } finally {
-            for (ActionListener listener : listeners) {
-                bufferDropdown.addActionListener(listener);
-            }
-        }
-    }
+    public void renameChannel(String oldName, String newName) { model.rename(oldName, newName); }
 
     private void promptRemoveChannel() {
         String channel = getCurrentChannel();
@@ -846,7 +791,25 @@ public class IrcPanel extends PluginPanel {
 
     public static class ChannelPane extends JTextPane {
         private final IrcConfig config;
-        private ArrayList<String> messageLog;
+        private final ArrayList<String> messageLog;
+        private boolean renderPending;
+        private List<IrcMessage> displayedMessages = Collections.emptyList();
+        private Map<IrcMessage, String> formattedMessages = new IdentityHashMap<>();
+
+        void showMessages(List<IrcMessage> messages) {
+            if (messages.equals(displayedMessages)) return;
+            displayedMessages = messages;
+            messageLog.clear();
+            Map<IrcMessage, String> next = new IdentityHashMap<>();
+            for (IrcMessage message : messages) {
+                String html = formattedMessages.get(message);
+                if (html == null) html = formatPanelMessage(message, config);
+                next.put(message, html);
+                messageLog.add(html);
+            }
+            formattedMessages = next;
+            scheduleRender();
+        }
         private static final Pattern UNDERLINE = Pattern.compile("\u001F([^\u001F\u000F]+)[\u001F\u000F]?");
         private static final Pattern ITALIC = Pattern.compile("\u001D([^\u001D\u000F]+)[\u001D\u000F]?");
         private static final Pattern BOLD = Pattern.compile("\u0002([^\u0002\u000F]+)[\u0002\u000F]?");
@@ -886,15 +849,18 @@ public class IrcPanel extends PluginPanel {
             });
         }
 
-        void appendMessage(IrcMessage message, IrcConfig config) {
-            String formattedMessage = formatPanelMessage(message, config);
-            messageLog.add(formattedMessage);
-            if (messageLog.size() > config.getMaxScrollback()) {
-                messageLog.remove(0);
-            }
+        private void scheduleRender() {
+            if (renderPending) return;
+            renderPending = true;
             SwingUtilities.invokeLater(() -> {
+                renderPending = false;
+                JScrollPane scroll = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, this);
+                JScrollBar bar = scroll == null ? null : scroll.getVerticalScrollBar();
+                boolean follow = bar == null || bar.getValue() + bar.getVisibleAmount() >= bar.getMaximum() - 8;
+                Point position = scroll == null ? null : scroll.getViewport().getViewPosition();
                 setText("<html><body style='color:" + ColorUtil.toHexColor(ColorScheme.TEXT_COLOR) + ";'>" + String.join("", messageLog) + "</body></html>");
-                setCaretPosition(getDocument().getLength());
+                if (follow) setCaretPosition(getDocument().getLength());
+                else scroll.getViewport().setViewPosition(position);
             });
         }
 
@@ -1150,11 +1116,6 @@ public class IrcPanel extends PluginPanel {
             } catch (NumberFormatException e) {
                 return false;
             }
-        }
-
-        public void clear() {
-            this.setText("");
-            messageLog = new ArrayList<>();
         }
 
         public void cancelPreviewManager() {

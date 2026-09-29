@@ -50,6 +50,8 @@ public class IrcDesktopLayoutTest {
                 panel.addChannel("#off-topic");
                 panel.addChannel("Luna");
                 panel.setFocusedChannel("#runelite");
+                panel.getModel().connection(IrcChatModel.Connection.READY, "Mikey");
+                panel.getModel().membership("#runelite", IrcChatModel.Membership.JOINED, "");
                 panel.setChannelUsers("#runelite", Arrays.asList(
                         new ChannelUserList.Entry("Ash", "@", 0),
                         new ChannelUserList.Entry("Mikey", "+", 1),
@@ -85,12 +87,12 @@ public class IrcDesktopLayoutTest {
                 assertNotNull(tree);
                 assertEquals(5, users.getModel().getSize());
                 assertEquals("#runelite", panel.getCurrentChannel());
-                assertTrue(panel.unreadMessages.get("#rshelp"));
+                assertTrue(panel.isUnread("#rshelp"));
                 render(panel.getChatContent());
 
                 tree.setSelectionPath(path(tree, "#rshelp"));
                 assertEquals("#rshelp", panel.getCurrentChannel());
-                assertFalse(panel.unreadMessages.get("#rshelp"));
+                assertFalse(panel.isUnread("#rshelp"));
                 assertEquals(0, users.getModel().getSize());
                 tree.setSelectionPath(path(tree, "#runelite"));
                 users.setSelectedIndex(0);

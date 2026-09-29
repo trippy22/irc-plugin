@@ -27,6 +27,13 @@ class ModeSpec {
     private String typeA = "";
     private String typeB = "";
     private String typeC = "";
+    private volatile String caseMapping = "rfc1459";
+    private int nickLength = 9;
+
+    String fold(String name) { return IrcNames.fold(name, caseMapping); }
+    String caseMapping() { return caseMapping; }
+
+    int nickLength() { return nickLength; }
 
     static ModeSpec defaults() {
         ModeSpec spec = new ModeSpec();
@@ -57,6 +64,12 @@ class ModeSpec {
                 parsePrefix(value);
             } else if ("CHANMODES".equals(key)) {
                 parseChanmodes(value);
+            } else if ("CASEMAPPING".equals(key)
+                    && ("ascii".equals(value) || "rfc1459".equals(value) || "strict-rfc1459".equals(value))) {
+                caseMapping = value;
+            } else if ("NICKLEN".equals(key)) {
+                try { nickLength = Math.max(3, Math.min(100, Integer.parseInt(value))); }
+                catch (NumberFormatException ignored) { }
             }
         }
     }

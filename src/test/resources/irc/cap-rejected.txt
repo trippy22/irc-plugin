@@ -1,0 +1,24 @@
+INPUT :server CAP * LS :sasl
+URGENT CAP REQ :sasl
+STATE Alice | null | false | []
+INPUT :server CAP * ACK :sasl
+URGENT AUTHENTICATE PLAIN
+STATE Alice | null | false | []
+INPUT AUTHENTICATE +
+URGENT AUTHENTICATE AEFsaWNlAHRlc3QtcGFzc3dvcmQ=
+STATE Alice | null | false | []
+INPUT :server 904 Alice :SASL authentication failed
+URGENT CAP END
+EVENT SASL_FAILED | <null> | <null> | SASL authentication failed | <null>
+STATE Alice | null | false | []
+INPUT :server CAP * NAK :chathistory
+STATE Alice | null | false | []
+INPUT :server 001 Alice :Welcome
+EVENT REGISTERED | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+INPUT :Alice!u@h JOIN #room
+EVENT CHANNEL_STATE | <null> | #room | JOINED | 
+EVENT JOIN | Alice | #room | <null> | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice]

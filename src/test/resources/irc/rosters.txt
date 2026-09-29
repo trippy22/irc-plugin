@@ -1,0 +1,74 @@
+INPUT :server 001 Alice :Welcome
+EVENT REGISTERED | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+INPUT :server 005 Alice PREFIX=(ov)@+ CHANMODES=b,k,l,imnpst CASEMAPPING=rfc1459 :supported
+EVENT SERVER_SUPPORT | <null> | <null> | <null> | <null>
+STATE Alice | Alice | true | []
+INPUT :Alice!u@h JOIN #room
+EVENT CHANNEL_STATE | <null> | #room | JOINED | 
+EVENT JOIN | Alice | #room | <null> | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice]
+INPUT :server 353 Alice = #room :Alice bob @dave erin frank
+EVENT NAMES | <null> | #room | Alice bob @dave erin frank | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice]
+INPUT :bob!u@h PART #room :bye
+EVENT PART | bob | #room | bye | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice]
+INPUT :carol!u@h JOIN #room
+EVENT JOIN | carol | #room | <null> | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice, carol]
+INPUT :dave!u@h NICK :David
+EVENT NICK_CHANGE | dave | <null> | David | 
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice, carol]
+INPUT :erin!u@h QUIT :bye
+EVENT QUIT | erin | <null> | bye | 
+STATE Alice | Alice | true | [#room]
+ROSTER #room [Alice, carol]
+INPUT :op!u@h MODE #room +v-o carol David
+EVENT CHANNEL_MODE | * op sets mode(s) | #room | +v-o carol David | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [+carol, Alice]
+INPUT :op!u@h KICK #room frank :bye
+EVENT KICK | op | #room | frank bye | <null>
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [+carol, Alice]
+INPUT :server 353 Alice = #room :bob @dave erin frank
+EVENT NAMES | <null> | #room | bob @dave erin frank | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [+carol, Alice]
+INPUT :server 366 Alice #room :End
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alice | Alice | true | [#room]
+ROSTER #room [+carol, Alice, David]
+INPUT :Alice!u@h NICK :Alicia
+EVENT NICK_CHANGE | Alice | <null> | Alicia | #room
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alicia | Alicia | true | [#room]
+ROSTER #room [+carol, Alicia, David]
+INPUT :server 433 Alicia Taken :Nickname in use
+EVENT SERVER_ERROR | <null> | <null> | Server error 433 for Taken: Nickname in use | <null>
+STATE Alicia | Alicia | true | [#room]
+ROSTER #room [+carol, Alicia, David]
+INPUT :server 432 Alicia bad/nick :Erroneous nickname
+EVENT SERVER_ERROR | <null> | <null> | Server error 432 for bad/nick: Erroneous nickname | <null>
+STATE Alicia | Alicia | true | [#room]
+ROSTER #room [+carol, Alicia, David]
+INPUT :server 005 Alicia CASEMAPPING=ascii :supported
+EVENT SERVER_SUPPORT | <null> | <null> | <null> | <null>
+STATE Alicia | Alicia | true | [#room]
+ROSTER #room [+carol, Alicia, David]
+INPUT :op!u@h KICK #room Alicia :bye
+EVENT KICK | op | #room | Alicia bye | <null>
+EVENT CHANNEL_STATE | <null> | #room | KICKED | bye
+EVENT USERS_CHANGED | <null> | #room | <null> | <null>
+STATE Alicia | Alicia | true | []
