@@ -58,9 +58,8 @@ public class IrcPlugin extends Plugin {
     private KeyManager keyManager;
     private IrcOverlay overlay;
     @Nullable
-    private volatile IrcAdapter ircAdapter;
+    private volatile IrcSessionController ircAdapter;
     private volatile IrcPanel panel;
-    private String sessionConfiguredNick;
     @Inject private ClientThread clientThread;
     @Inject
     private EmojiService emojiService;
@@ -123,7 +122,6 @@ public class IrcPlugin extends Plugin {
     private void connectToIrc() { connectToIrc(null); }
 
     private void connectToIrc(String retainedNick) {
-        sessionConfiguredNick = config.username();
         // Seed nick only; once connected the network's confirmed nick (tracked by the
         // adapter from the raw NICK event) is the source of truth - see ircAdapter.getNick().
         String initialNick;
@@ -135,7 +133,7 @@ public class IrcPlugin extends Plugin {
             initialNick = sanitizeNick(config.username());
         }
 
-        ircAdapter = new IrcAdapter();
+        ircAdapter = new IrcSessionController();
         ircAdapter.initialize(config, this::processMessage, panel, initialNick);
         ircAdapter.connect();
     }
@@ -169,7 +167,7 @@ public class IrcPlugin extends Plugin {
     private void handleMessageSend(String channel, String message) {
         if (!SwingUtilities.isEventDispatchThread()) {
             IrcPanel targetPanel = panel;
-            IrcAdapter session = ircAdapter;
+            IrcSessionController session = ircAdapter;
             SwingUtilities.invokeLater(() -> {
                 if (panel == targetPanel && ircAdapter == session) handleMessageSend(channel, message);
             });
@@ -295,7 +293,7 @@ public class IrcPlugin extends Plugin {
                 String idCommand = identifyCommandFromArgs(arg);
                 if (idCommand != null) {
                     // Both account and password supplied inline.
-                    ircAdapter.getClient().sendMessage("NickServ", idCommand);
+                    ircAdapter.identify(idCommand);
                 } else {
                     // A lone token is the account; no token means prompt for the account too.
                     String idAccount = arg.isEmpty() ? null : arg.trim().split("\\s+")[0];
@@ -466,7 +464,7 @@ public class IrcPlugin extends Plugin {
     }
 
     private void promptForIdentify(String account) {
-        IrcAdapter session = ircAdapter;
+        IrcSessionController session = ircAdapter;
         IrcPanel targetPanel = panel;
         if (session == null || targetPanel == null) return;
 
@@ -490,7 +488,7 @@ public class IrcPlugin extends Plugin {
             String password = new String(passwordField.getPassword());
             if (password.isEmpty()) return;
 
-            session.getClient().sendMessage("NickServ", identifyCommand(acct, password));
+            session.identify(identifyCommand(acct, password));
         });
     }
 
@@ -585,21 +583,9 @@ public class IrcPlugin extends Plugin {
     }
 
     private void handleReconnect(Boolean ignored) {
-        if (ircAdapter == null || panel == null) return;
-        IrcAdapter previous = ircAdapter;
-        previous.clearPanel();
-        previous.disconnect("Reloading, brb");
-        for (String channel : panel.getChannelNames()) panel.setChannelUsers(channel, Collections.emptyList());
-        panel.cancelChannelListTimeout();
-        previous.getClient().onDisconnected(() -> SwingUtilities.invokeLater(() -> {
-            if (ircAdapter != previous || panel == null) return;
-            Map<String, String> desired = previous.getClient().getDesiredChannels();
-            String nick = Objects.equals(sessionConfiguredNick, config.username())
-                    ? previous.getClient().getConfirmedNick() : null;
-            connectToIrc(nick);
-            desired.forEach(this::joinChannel);
-        }));
+        if (ircAdapter != null) ircAdapter.reload();
     }
+
     private void sendMessage(String target, String message) {
         if (ircAdapter == null) return;
         ircAdapter.sendMessage(target, message);
@@ -616,7 +602,7 @@ public class IrcPlugin extends Plugin {
 
     private void processMessage(IrcMessage message) {
         IrcPanel targetPanel = panel;
-        IrcAdapter session = ircAdapter;
+        IrcSessionController session = ircAdapter;
         if (targetPanel == null) return;
         if (!SwingUtilities.isEventDispatchThread()) {
             SwingUtilities.invokeLater(() -> {
@@ -624,13 +610,7 @@ public class IrcPlugin extends Plugin {
             });
             return;
         }
-        for (String channel : targetPanel.getChannelNames()) {
-            if (!channel.equals(message.getChannel()) && session != null
-                    && session.getClient().sameName(channel, message.getChannel())) {
-                targetPanel.renameChannel(channel, message.getChannel());
-                break;
-            }
-        }
+        if (!targetPanel.getModel().accepts(message.getChannel())) return;
         boolean activeChannel = targetPanel.getCurrentChannel().equals(message.getChannel());
         boolean systemEvent = message.getChannel().equals("System")
                 && (message.getType() == IrcMessage.MessageType.QUIT || message.getType() == IrcMessage.MessageType.NICK_CHANGE);

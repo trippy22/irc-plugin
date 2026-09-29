@@ -31,6 +31,14 @@ public class IrcAdapter {
     private volatile String lastChannelListQuery = "";
     private boolean listPending; // EDT-owned, includes time waiting in the output queue.
     private long listRequestId;
+    private java.util.function.BiConsumer<SimpleIrcClient.IrcEvent, String> eventObserver = (event, nick) -> {};
+    private java.util.function.BiConsumer<String, String> joinRequested = this::joinChannel;
+
+    void observe(java.util.function.BiConsumer<SimpleIrcClient.IrcEvent, String> observer,
+                 java.util.function.BiConsumer<String, String> joinRequested) {
+        this.eventObserver = observer;
+        this.joinRequested = joinRequested;
+    }
 
     public IrcAdapter() {
         client = new SimpleIrcClient();
@@ -226,6 +234,7 @@ public class IrcAdapter {
     private void handleEvent(SimpleIrcClient.IrcEvent event, String eventNick,
                              List<ChannelListEntry> eventList,
                              boolean eventTruncated, String eventQuery) {
+        eventObserver.accept(event, eventNick);
         String target = event.getTarget();
         String source = event.getSource();
 
@@ -320,15 +329,6 @@ public class IrcAdapter {
                 String oldNick = event.getSource();
                 String newNick = event.getMessage();
 
-                if (panel != null) {
-                    for (String name : panel.getChannelNames()) {
-                        if (client.sameName(name, oldNick)) {
-                            panel.renameChannel(name, newNick);
-                            break;
-                        }
-                    }
-                }
-
                 if (event.getAdditionalData() != null) {
                     String[] channels = event.getAdditionalData().split(",");
                     for (String channel : channels) {
@@ -418,7 +418,9 @@ public class IrcAdapter {
                     String password = JOptionPane.showInputDialog(panel.getChatContent(),
                             "Enter password for " + badChannel + ":", "Channel Key Required", JOptionPane.QUESTION_MESSAGE);
                     // Modal dialogs run a nested event loop; the connection may have retired.
-                    if (active && password != null && !password.isEmpty()) joinChannel(badChannel, password);
+                    if (active && password != null && !password.isEmpty()
+                            && client.getDesiredChannels().keySet().stream().anyMatch(c -> client.sameName(c, badChannel)))
+                        joinRequested.accept(badChannel, password);
                 }
                 break;
             case WHOIS_REPLY:

@@ -32,8 +32,6 @@ import java.util.regex.Pattern;
 
 @Slf4j
 public class SimpleIrcClient {
-    private static final Pattern MESSAGE_PATTERN =
-            Pattern.compile("^(?:[:@](\\S+) )?(\\S+)(?: ((?:[^:\\s]\\S* ?)*))?(?: ?:(.*))?$");
     private static final Pattern NUMERIC = Pattern.compile("^[0-9]{3}$");
 
     private volatile Socket transport;
@@ -200,7 +198,7 @@ public class SimpleIrcClient {
                     }, 30, java.util.concurrent.TimeUnit.SECONDS);
                 }
                 String line;
-                while (!shuttingDown && (line = reader.readLine()) != null) processLine(line);
+                while (!shuttingDown && (line = IrcLine.read(reader)) != null) processLine(line);
                 if (!shuttingDown) recordDisconnectReason("Server closed the connection");
             } catch (Exception e) {
                 if (!shuttingDown) {
@@ -286,6 +284,17 @@ public class SimpleIrcClient {
         return a != null && b != null && modeSpec.fold(a).equals(modeSpec.fold(b));
     }
 
+    public String getCaseMapping() { return modeSpec.caseMapping(); }
+
+    static boolean validChannel(String channel) {
+        return isChannel(channel) && channel.length() > 1
+                && channel.chars().noneMatch(c -> c <= 32 || c == ',' || c == 127);
+    }
+
+    private void channelState(String channel, String state, String detail) {
+        fireEvent(new IrcEvent(IrcEvent.Type.CHANNEL_STATE, null, channel, state, detail));
+    }
+
     public static boolean isChannel(String name) {
         return name != null && !name.isEmpty() && "#&+!".indexOf(name.charAt(0)) >= 0;
     }
@@ -295,7 +304,7 @@ public class SimpleIrcClient {
     }
 
     public synchronized void joinChannel(String channel, String password) {
-        if (!isChannel(channel) || channel.matches(".*[\\s,\\x00].*")) {
+        if (!validChannel(channel)) {
             commandError("Invalid channel name: " + channel);
             return;
         }
@@ -306,19 +315,33 @@ public class SimpleIrcClient {
             return;
         }
         if (registered) sendJoin(channel);
+        else channelState(channel, "WAITING", "Waiting for registration");
         // Registration drains the desired map once, so part-before-welcome cancels the join.
     }
 
     private void sendJoin(String channel) {
         String password = desiredChannels.get(channel);
-        sendCommand("JOIN " + channel + (password == null || password.isEmpty() ? "" : " " + password), null);
+        String command = "JOIN " + channel + (password == null || password.isEmpty() ? "" : " " + password);
+        output.cancelMatching(key -> sameName(key, channel));
+        if (validLine(command) && output.offer(command, false, null, channel)) {
+            channelState(channel, "JOINING", "Waiting for the server to confirm JOIN");
+        } else {
+            channelState(channel, "FAILED", "JOIN could not be queued; retry joining this channel");
+            commandError("JOIN " + channel + " could not be queued; check the channel key or output queue.");
+        }
     }
 
     public void leaveChannel(String channel) { leaveChannel(channel, null); }
 
     public synchronized void leaveChannel(String channel, String reason) {
         desiredChannels.keySet().removeIf(name -> sameName(name, channel));
-        if (registered) sendCommand("PART " + channel + (reason == null || reason.isEmpty() ? "" : " :" + reason), null);
+        boolean cancelled = output.cancelMatching(key -> sameName(key, channel));
+        boolean joined = channels.stream().anyMatch(name -> sameName(name, channel));
+        if (registered && (!cancelled || joined)) {
+            channelState(channel, "LEAVING", "Waiting for the server to confirm PART");
+            // Membership cleanup must remain possible when the ordinary command queue is full.
+            enqueue("PART " + channel + (reason == null || reason.isEmpty() ? "" : " :" + reason), true, null);
+        } else channelState(channel, "OFFLINE", "Join cancelled");
     }
 
     public void sendMessage(String target, String message) { sendMessage(target, message, null); }
@@ -375,61 +398,16 @@ public class SimpleIrcClient {
     synchronized void processLine(String line) {
         if (shuttingDown) return;
         if (rawLogging) log.info("IRC << {}", redactForLog(line));
-
-        // Reset per-line tag state
-        currentTagTime = null;
-        currentTagBatch = null;
-
-        // Strip and parse IRCv3 message tags (@key=value;...)
-        if (line.startsWith("@")) {
-            int spaceIdx = line.indexOf(' ');
-            if (spaceIdx > 0) {
-                String tagSegment = line.substring(1, spaceIdx);
-                line = line.substring(spaceIdx + 1);
-                for (String tag : tagSegment.split(";")) {
-                    int eq = tag.indexOf('=');
-                    if (eq > 0) {
-                        String key = tag.substring(0, eq);
-                        String value = tag.substring(eq + 1);
-                        if ("time".equals(key)) currentTagTime = value;
-                        else if ("batch".equals(key)) currentTagBatch = value;
-                    }
-                }
-            }
+        IrcLine decoded = IrcLine.parse(line);
+        if (decoded == null) return;
+        currentTagTime = decoded.tags.get("time");
+        currentTagBatch = decoded.tags.get("batch");
+        if ("PING".equals(decoded.command)) {
+            sendRawLine("PONG :" + (decoded.params.isEmpty() ? "" : decoded.params.get(decoded.params.size() - 1)));
+            return;
         }
-
-        Matcher matcher = MESSAGE_PATTERN.matcher(line);
-
-        if (matcher.matches()) {
-            String sourceRaw = matcher.group(1);
-            String command = matcher.group(2);
-            String paramsRaw = matcher.group(3);
-            String trailing = matcher.group(4);
-
-            String source = sourceRaw != null ? sourceRaw : "";
-            List<String> params = new ArrayList<>();
-
-            if (paramsRaw != null) {
-                for (String param : paramsRaw.split(" ")) {
-                    if (!param.isEmpty()) {
-                        params.add(param);
-                    }
-                }
-            }
-
-            if (trailing != null) {
-                params.add(trailing);
-            }
-
-            if (command.equals("PING")) {
-                sendRawLine("PONG :" + (params.isEmpty() ? "" : params.get(params.size() - 1)));
-                return;
-            }
-
-            processCommand(source, command, params);
-        }
+        processCommand(decoded.source, decoded.command, decoded.params);
     }
-
     private void processCommand(String source, String command, List<String> params) {
         String sourceNick = extractNick(source);
 
@@ -479,7 +457,10 @@ public class SimpleIrcClient {
             case "JOIN":
                 if (!params.isEmpty()) {
                     String channel = params.get(0);
-                    if (sameName(sourceNick, nick)) channels.add(channel);
+                    if (sameName(sourceNick, nick)) {
+                        channels.add(channel);
+                        channelState(channel, "JOINED", "");
+                    }
                     fireEvent(new IrcEvent(IrcEvent.Type.JOIN, sourceNick, channel, null, null));
                     channelUserList.join(channel, sourceNick);
                     fireUsersChanged(channel);
@@ -501,6 +482,8 @@ public class SimpleIrcClient {
                     } else {
                         channels.removeIf(joined -> sameName(joined, channel));
                         channelUserList.removeChannel(channel);
+                        channelState(channel, desiredChannels.keySet().stream().anyMatch(c -> sameName(c, channel))
+                                ? "JOINING" : "OFFLINE", reason);
                         fireUsersChanged(channel);
                     }
                 }
@@ -545,6 +528,7 @@ public class SimpleIrcClient {
                     } else {
                         channels.removeIf(joined -> sameName(joined, channel));
                         channelUserList.removeChannel(channel);
+                        channelState(channel, "KICKED", kickMessage);
                         fireUsersChanged(channel);
                     }
                 }
@@ -754,6 +738,7 @@ public class SimpleIrcClient {
                 if (params.size() >= 2) {
                     modeSpec.applyIsupport(params.subList(1, params.size()));
                     channelUserList.reindex();
+                    fireEvent(new IrcEvent(IrcEvent.Type.SERVER_SUPPORT, null, null, null, null));
                 }
                 break;
             case 263: // RPL_TRYAGAIN: only a throttled LIST concerns us here.
@@ -903,8 +888,10 @@ public class SimpleIrcClient {
                 }
                 break;
             case 475:
-                if (params.size() >= 3)
+                if (params.size() >= 3) {
+                    channelState(params.get(1), "FAILED", params.get(2));
                     fireEvent(new IrcEvent(IrcEvent.Type.BAD_CHANNEL_KEY, null, params.get(1), params.get(2), null));
+                }
                 break;
             case 903: // RPL_SASLSUCCESS
                 if (!capEndSent) {
@@ -935,6 +922,9 @@ public class SimpleIrcClient {
                 // report it verbatim rather than enumerating every numeric a server might send.
                 if (numeric >= 400 && numeric <= 599 && params.size() >= 2) {
                     String errorText = String.join(" ", params.subList(1, params.size()));
+                    if ((numeric == 403 || numeric == 405 || numeric == 471 || numeric == 473
+                            || numeric == 474 || numeric == 476 || numeric == 477 || numeric == 489)
+                            && isChannel(params.get(1))) channelState(params.get(1), "FAILED", errorText);
                     if (errorText != null && !errorText.isEmpty()) {
                         fireEvent(new IrcEvent(IrcEvent.Type.SERVER_ERROR, null, null,
                                 "Server error " + numeric + ": " + errorText, null));
@@ -1167,7 +1157,7 @@ public class SimpleIrcClient {
             NICK_CHANGE, KICK, NOTICE, SERVER_NOTICE, CHANNEL_MODE, USER_MODE,
             TOPIC, NAMES, NICK_IN_USE, ERROR, TOPIC_INFO, BAD_CHANNEL_KEY, WHOIS_REPLY,
             HISTORY_BATCH, SASL_SUCCESS, SASL_FAILED, USERS_CHANGED,
-            CHANNEL_LIST, CHANNEL_LIST_FAILED, SERVER_ERROR
+            CHANNEL_LIST, CHANNEL_LIST_FAILED, SERVER_ERROR, CHANNEL_STATE, SERVER_SUPPORT
         }
 
         private final Type type;

@@ -51,6 +51,11 @@ public class IrcPanelPopOutTest {
                 IrcPanel.ChannelPane original = panel.getChannelPanes().get("#test");
                 assertTrue(original.getText().contains("test scrollback"));
                 panel.inputField.setText("my draft");
+                panel.addChannel("#other");
+                panel.setFocusedChannel("#other");
+                panel.inputField.setText("other draft");
+                panel.setFocusedChannel("#test");
+                assertEquals("my draft", panel.inputField.getText());
                 panel.showChannelList(Collections.emptyList(), "", false);
                 ChannelListDialog dockedBrowser = getBrowser(panel);
                 assertSame(mainRef.get(), dockedBrowser.getOwner());
@@ -78,6 +83,8 @@ public class IrcPanelPopOutTest {
                 panel.inputField.postActionEvent();
                 assertEquals("#test:docked message", sent.get());
                 assertTrue(original.getText().contains("test scrollback"));
+                panel.setFocusedChannel("#other");
+                assertEquals("other draft", panel.inputField.getText());
             });
         } finally {
             SwingUtilities.invokeAndWait(() -> {

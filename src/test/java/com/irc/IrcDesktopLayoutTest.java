@@ -50,6 +50,8 @@ public class IrcDesktopLayoutTest {
                 panel.addChannel("#off-topic");
                 panel.addChannel("Luna");
                 panel.setFocusedChannel("#runelite");
+                panel.getModel().connection(IrcChatModel.Connection.READY, "Mikey");
+                panel.getModel().membership("#runelite", IrcChatModel.Membership.JOINED, "");
                 panel.setChannelUsers("#runelite", Arrays.asList(
                         new ChannelUserList.Entry("Ash", "@", 0),
                         new ChannelUserList.Entry("Mikey", "+", 1),

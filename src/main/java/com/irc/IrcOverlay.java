@@ -111,8 +111,8 @@ public class IrcOverlay extends Overlay implements KeyListener {
         graphics.fillRect(x, y, width, height);
 
         // tabs
-        IrcPanel.BufferSnapshot buffers = panel.getBufferSnapshot();
-        java.util.List<String> channels = buffers.channels;
+        IrcChatModel.Snapshot buffers = panel.getModel().snapshot();
+        java.util.List<String> channels = buffers.conversations.stream().map(b -> b.name).collect(java.util.stream.Collectors.toList());
         int activeTabIndex = Math.max(0, channels.indexOf(buffers.selected));
 
         int xOffset = 0;
@@ -120,7 +120,7 @@ public class IrcOverlay extends Overlay implements KeyListener {
         for (int i = 0; i < channels.size(); i++) {
             boolean isActive = i == activeTabIndex;
             String channel = channels.get(i);
-            boolean isUnread = buffers.unread.getOrDefault(channel, false);
+            boolean isUnread = buffers.conversations.get(i).unread;
 
             FontMetrics fm = graphics.getFontMetrics();
             int tabWidth = fm.stringWidth(channel) + padding * 2 - tabSpacing; // 8px padding each side

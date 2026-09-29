@@ -128,6 +128,31 @@ public class IrcConnectionTest {
         }
     }
 
+    @Test public void leavingCancelsJoinAlreadyWaitingInOutputQueue() throws Exception {
+        try (ServerSocket server = new ServerSocket(0, 10, InetAddress.getLoopbackAddress())) {
+            SimpleIrcClient client = client(server, false);
+            CountDownLatch ready = new CountDownLatch(1);
+            client.addEventListener(e -> { if (e.getType() == SimpleIrcClient.IrcEvent.Type.REGISTERED) ready.countDown(); });
+            try {
+                client.connect();
+                try (Socket peer = server.accept()) {
+                    BufferedReader in = reader(peer);
+                    handshake(in, "Alice");
+                    send(peer, ":server 001 Alice :Welcome");
+                    assertTrue(ready.await(2, TimeUnit.SECONDS));
+                    client.sendMessage("Bob", "first");
+                    assertEquals("PRIVMSG Bob :first", in.readLine());
+                    client.joinChannel("#cancel", "key");
+                    client.leaveChannel("#CANCEL");
+                    client.sendMessage("Bob", "second");
+                    assertEquals("PRIVMSG Bob :second", in.readLine());
+                    assertTrue(client.getDesiredChannels().isEmpty());
+                    closed(client);
+                }
+            } finally { client.disconnect(); }
+        }
+    }
+
     @Test public void nickFallbackObeysNicklenAndStopsAfterWelcome() throws Exception {
         try (ServerSocket server = new ServerSocket(0, 10, InetAddress.getLoopbackAddress())) {
             SimpleIrcClient client = client(server, false).credentials("LongNickname", "test", "Test");

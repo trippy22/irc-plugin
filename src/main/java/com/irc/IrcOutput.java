@@ -15,11 +15,23 @@ final class IrcOutput implements AutoCloseable {
     private boolean closed;
 
     synchronized boolean offer(String text, boolean urgent, Runnable sent) {
+        return offer(text, urgent, sent, null);
+    }
+
+    synchronized boolean offer(String text, boolean urgent, Runnable sent, String key) {
         Deque<Line> queue = urgent ? protocol : commands;
         if (closed || queue.size() >= LIMIT) return false;
-        queue.addLast(new Line(text, sent));
+        queue.addLast(new Line(text, sent, key));
         notifyAll();
         return true;
+    }
+
+    synchronized boolean cancel(String key) {
+        return commands.removeIf(line -> key.equals(line.key));
+    }
+
+    synchronized boolean cancelMatching(java.util.function.Predicate<String> keyMatches) {
+        return commands.removeIf(line -> line.key != null && keyMatches.test(line.key));
     }
 
     void run(BufferedWriter writer, Consumer<IOException> failure, Consumer<String> log) {
@@ -70,6 +82,7 @@ final class IrcOutput implements AutoCloseable {
     private static final class Line {
         final String text;
         final Runnable sent;
-        Line(String text, Runnable sent) { this.text = text; this.sent = sent; }
+        final String key;
+        Line(String text, Runnable sent, String key) { this.text = text; this.sent = sent; this.key = key; }
     }
 }

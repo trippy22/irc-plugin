@@ -30,20 +30,8 @@ class ModeSpec {
     private volatile String caseMapping = "rfc1459";
     private int nickLength = 9;
 
-    String fold(String name) {
-        StringBuilder folded = new StringBuilder(name.length());
-        for (char c : name.toCharArray()) {
-            if (c >= 'A' && c <= 'Z') c += 32;
-            if (!"ascii".equals(caseMapping)) {
-                if (c == '[') c = '{';
-                else if (c == ']') c = '}';
-                else if (c == '\\') c = '|';
-                else if (c == '^' && "rfc1459".equals(caseMapping)) c = '~';
-            }
-            folded.append(c);
-        }
-        return folded.toString();
-    }
+    String fold(String name) { return IrcNames.fold(name, caseMapping); }
+    String caseMapping() { return caseMapping; }
 
     int nickLength() { return nickLength; }
 
