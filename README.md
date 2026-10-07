@@ -84,6 +84,8 @@ Clear the side panel: `;;clear`
 
 Open IRC in its own window: `;;popout`
 
+Combine IRC and the game in one RuneLite window: `;;attach`
+
 Add, edit, or remove IRC networks: `;;networks`
 
 Disconnect from the selected channel's network: `;;quit [message]`
@@ -224,6 +226,27 @@ into a separate, resizable window. `;;popout` works even when **Enabled** is off
 window to the front if it is already open.
 Drag its title bar to move it, including to another monitor. All chat controls remain
 interactive: type messages, switch channels, browse channels, and click links as usual.
+For **one combined window**, type `;;attach` or click **Combine window** in the pop-out.
+IRC moves inside RuneLite beneath the game, sharing its title bar, minimize/maximize controls,
+and taskbar entry. Drag the divider above IRC to adjust its height. Click **Pop out** or type
+`;;popout` to return to a separate window; **Dock ↗** returns to the sidebar. The combined layout
+and chat height are remembered. Disabling the plugin removes the bottom pane and restores the
+normal RuneLite layout. The game keeps its minimum size, so a combined window needs enough
+screen height for both the game and IRC.
+
+Click **Attach below** for a short, SwiftKit-style chat window beneath RuneLite. It matches
+RuneLite's width and follows when you move or resize the game. You can also drag the pop-out's
+title bar near RuneLite's bottom edge to snap it into place. Drag away to release it, or click
+**Float** to return to its previous floating size and position. Resize its lower edge to change
+the attached height. The attachment and height are remembered across restarts.
+This option keeps IRC in a separate window; **Combine window** puts it inside RuneLite.
+
+Attached chat hides with RuneLite when minimized and reappears when restored. It stays within
+the monitor's usable area, above the taskbar. If there is not enough room below RuneLite, chat
+overlaps the bottom of the game; move or shorten RuneLite to make room beneath it. The shortcut
+tips are hidden while attached to leave more room for messages. **Dock ↗** still returns IRC to
+the sidebar.
+
 The expanded layout includes a channel tree with unread markers, chat in the center, and a user
 list on the right. Drag the dividers to adjust column widths. The **Channel list** and **User
 list** buttons hide or show either side.

@@ -4,6 +4,7 @@ import com.google.inject.Provides;
 import com.irc.emoji.EmojiParser;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.Client;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.NavigationButton;
@@ -39,6 +40,8 @@ public class IrcPanel extends PluginPanel {
     private ConfigManager configManager;
     @Inject
     private OkHttpClient okHttpClient;
+    @Inject
+    private Client client;
 
     @Getter
     private final JPanel chatContent = new JPanel(new BorderLayout());
@@ -291,7 +294,15 @@ public class IrcPanel extends PluginPanel {
                 () -> configManager == null ? null : configManager.getConfiguration("irc", PopOutGeometry.CONFIG_KEY),
                 geometry -> {
                     if (configManager != null) configManager.setConfiguration("irc", PopOutGeometry.CONFIG_KEY, geometry);
-                });
+                }, () -> client != null && client.getCanvas() != null
+                        ? SwingUtilities.getWindowAncestor(client.getCanvas())
+                        : SwingUtilities.getWindowAncestor(this));
+        panelWindow.setDockingChanged(docked -> {
+            if (desktopLayout != null) {
+                desktopLayout.setBottomDocked(docked, panelWindow.canAttachBelow());
+                desktopLayout.setEmbedded(panelWindow.isEmbedded(), panelWindow.canEmbed());
+            }
+        });
         navigationButton = generateNavigationButton();
         SwingUtilities.invokeLater(() -> addChannel("System"));
         tabbedPane.addChangeListener(e -> onFocusedBufferChanged());
@@ -855,6 +866,8 @@ public class IrcPanel extends PluginPanel {
                             },
                             this::requestDock, getFontComboBox(), getFontSizeComboBox(),
                             nick -> config.colorizedNicks() ? nickColorFor(nick) : null);
+                    desktopLayout.configureBottomDock(() -> panelWindow.toggleBottomDock());
+                    desktopLayout.configureEmbeddedDock(() -> panelWindow.toggleEmbedded());
                     desktopLayout.setMoves(new IrcDesktopLayout.Moves() {
                         @Override public void moveNetwork(String id, int newIndex) { userMovedNetwork(id, newIndex); }
                         @Override public void moveBuffer(BufferKey key, int newIndex) { userMovedBuffer(key, newIndex); }
@@ -904,6 +917,11 @@ public class IrcPanel extends PluginPanel {
     }
 
     public void bringPopOutToFront() {
+        panelWindow.popOut();
+    }
+
+    public void attachToMainWindow() {
+        panelWindow.embedInMainWindow();
         panelWindow.toFront();
     }
 

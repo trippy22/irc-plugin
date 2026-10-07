@@ -352,7 +352,7 @@ public class IrcPlugin extends Plugin {
 
     /** Commands that work without a live connection to the buffer's network. */
     private static final Set<String> OFFLINE_COMMANDS = new HashSet<>(Arrays.asList(
-            "go", "clear", "popout", "help", "networks", "c", "close", "leave", "part"));
+            "go", "clear", "popout", "attach", "help", "networks", "c", "close", "leave", "part"));
 
     private static String passwordKey(String networkId, String channel) {
         return networkId + "\u0000" + channel.toLowerCase();
@@ -627,13 +627,23 @@ public class IrcPlugin extends Plugin {
 
             case "popout":
                 // Reachable from the chat box, so this works even when the sidebar is hidden.
-                if (config.popOut()) {
-                    SwingUtilities.invokeLater(() -> {
-                        if (panel != null) panel.bringPopOutToFront();
-                    });
-                } else {
-                    configManager.setConfiguration("irc", "popOut", true);
-                }
+                configManager.setConfiguration("irc", "popOut", true);
+                SwingUtilities.invokeLater(() -> {
+                    if (panel != null) {
+                        panel.setDetached(true, config.popOutAlwaysOnTop());
+                        panel.bringPopOutToFront();
+                    }
+                });
+                break;
+
+            case "attach":
+                configManager.setConfiguration("irc", "popOut", true);
+                SwingUtilities.invokeLater(() -> {
+                    if (panel != null) {
+                        panel.setDetached(true, config.popOutAlwaysOnTop());
+                        panel.attachToMainWindow();
+                    }
+                });
                 break;
 
             case "networks":
@@ -760,6 +770,7 @@ public class IrcPlugin extends Plugin {
                 "/list [filter] - Browse the server's channel list (e.g. /list >50)",
                 "/part [#channel] - Leave a channel (aliased as /leave)",
                 "/popout - Open IRC in its own window",
+                "/attach - Put IRC inside RuneLite, below the game",
                 "/me <action> - Send action message",
                 "/mode [#channel] [+modes|-modes] - Modify channel modes",
                 "/msg <nick> <message> - Send private message",

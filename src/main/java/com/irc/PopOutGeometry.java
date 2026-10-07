@@ -13,28 +13,44 @@ final class PopOutGeometry {
 
     final Rectangle bounds;
     final boolean maximized;
+    final int dockHeight;
+    final boolean embedded;
 
     PopOutGeometry(Rectangle bounds, boolean maximized) {
-        this.bounds = new Rectangle(bounds);
-        this.maximized = maximized;
+        this(bounds, maximized, 0);
     }
 
-    /** "x,y,width,height" with ",maximized" on the end when it was. */
+    PopOutGeometry(Rectangle bounds, boolean maximized, int dockHeight) {
+        this(bounds, maximized, dockHeight, false);
+    }
+
+    PopOutGeometry(Rectangle bounds, boolean maximized, int dockHeight, boolean embedded) {
+        this.bounds = new Rectangle(bounds);
+        this.maximized = maximized;
+        this.dockHeight = dockHeight;
+        this.embedded = embedded;
+    }
+
+    /** Floating bounds, optionally followed by ",maximized", ",bottom,height" or ",embedded,height". */
     String serialize() {
         return bounds.x + "," + bounds.y + "," + bounds.width + "," + bounds.height
-                + (maximized ? ",maximized" : "");
+                + (dockHeight > 0 ? (embedded ? ",embedded," : ",bottom,") + dockHeight : maximized ? ",maximized" : "");
     }
 
     /** Null for anything unreadable, so a bad value falls back to the default placement. */
     static PopOutGeometry parse(String value) {
         if (value == null) return null;
         String[] parts = value.trim().split(",");
-        if (parts.length != 4 && !(parts.length == 5 && "maximized".equals(parts[4]))) return null;
+        boolean embedded = parts.length == 6 && "embedded".equals(parts[4]);
+        boolean bottom = parts.length == 6 && ("bottom".equals(parts[4]) || embedded);
+        if (parts.length != 4 && !(parts.length == 5 && "maximized".equals(parts[4])) && !bottom) return null;
         try {
             Rectangle bounds = new Rectangle(Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()),
                     Integer.parseInt(parts[2].trim()), Integer.parseInt(parts[3].trim()));
             if (bounds.width <= 0 || bounds.height <= 0) return null;
-            return new PopOutGeometry(bounds, parts.length == 5);
+            int height = bottom ? Integer.parseInt(parts[5].trim()) : 0;
+            if (bottom && height <= 0) return null;
+            return new PopOutGeometry(bounds, parts.length == 5, height, embedded);
         } catch (NumberFormatException e) {
             return null;
         }

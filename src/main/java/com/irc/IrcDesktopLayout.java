@@ -115,6 +115,9 @@ final class IrcDesktopLayout extends JPanel {
     private final NetworkActions networkActions;
     private final JToggleButton channelsToggle = new JToggleButton("Channel list", true);
     private final JToggleButton usersToggle = new JToggleButton("User list", true);
+    private final JButton bottomDockButton = button("Attach below", "Attach below RuneLite; drag away to release", () -> { });
+    private final JButton embedButton = button("Combine window", "Put IRC inside RuneLite, below the game", () -> { });
+    private final JPanel shortcutHints;
     private JTextField input;
     private boolean synchronizing;
     private Moves moves = Moves.NONE;
@@ -234,7 +237,8 @@ final class IrcDesktopLayout extends JPanel {
             }
         });
 
-        JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        JPanel toolbar = new JPanel(new WrapLayout(FlowLayout.LEFT, 6, 6));
+        toolbar.setName("ircToolbar");
         toolbar.setBackground(HEADER);
         JButton reconnectButton = button("", "Reconnect the selected network", () -> networkActions.reconnect(selectedKey.getNetworkId()));
         reconnectButton.setName("ircReconnect");
@@ -256,17 +260,15 @@ final class IrcDesktopLayout extends JPanel {
         fontSizeSelector.setToolTipText("Chat font size");
         fontSizeSelector.setFocusable(false);
         toolbar.add(fontSizeSelector);
-        JPanel top = new JPanel(new BorderLayout());
-        top.setBackground(HEADER);
-        top.add(toolbar, BorderLayout.WEST);
         JButton dockButton = button("Dock ↗", "Return to the RuneLite sidebar", dock);
-        JPanel dockArea = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 6));
-        dockArea.setBackground(HEADER);
-        dockArea.add(channelsToggle);
-        dockArea.add(usersToggle);
-        dockArea.add(dockButton);
-        top.add(dockArea, BorderLayout.EAST);
-        add(top, BorderLayout.NORTH);
+        toolbar.add(channelsToggle);
+        toolbar.add(usersToggle);
+        bottomDockButton.setName("ircAttachBelow");
+        toolbar.add(bottomDockButton);
+        embedButton.setName("ircCombineWindow");
+        toolbar.add(embedButton);
+        toolbar.add(dockButton);
+        add(toolbar, BorderLayout.NORTH);
 
         conversation.setMinimumSize(new Dimension(220, 100));
         composer.setBackground(HEADER);
@@ -325,9 +327,37 @@ final class IrcDesktopLayout extends JPanel {
         add(all, BorderLayout.CENTER);
         configureToggle(channelsToggle, "ircToggleChannels", "Show or hide the channel list", all, left);
         configureToggle(usersToggle, "ircToggleUsers", "Show or hide the user list", chatAndUsers, right);
-        add(hints("Enter to send", "↑ / ↓ input history", "Alt+1–0 or Alt+J ## switch channel",
+        shortcutHints = hints("Enter to send", "↑ / ↓ input history", "Alt+1–0 or Alt+J ## switch channel",
                 "Alt+H mark all read", "Alt+↑ / ↓ next channel", "Alt+/ last channel",
-                "Alt+< / > channel history", "Double-click a nick to message"), BorderLayout.SOUTH);
+                "Alt+< / > channel history", "Double-click a nick to message");
+        add(shortcutHints, BorderLayout.SOUTH);
+    }
+
+    void configureBottomDock(Runnable toggle) {
+        bottomDockButton.addActionListener(e -> toggle.run());
+    }
+
+    void configureEmbeddedDock(Runnable toggle) {
+        embedButton.addActionListener(e -> toggle.run());
+    }
+
+    void setBottomDocked(boolean docked, boolean available) {
+        bottomDockButton.setText(docked ? "Float" : "Attach below");
+        bottomDockButton.setToolTipText(docked ? "Release from RuneLite" : "Attach below RuneLite; drag away to release");
+        bottomDockButton.setEnabled(available);
+        shortcutHints.setVisible(!docked);
+        revalidate();
+        repaint();
+    }
+
+    void setEmbedded(boolean embedded, boolean available) {
+        embedButton.setText(embedded ? "Pop out" : "Combine window");
+        embedButton.setToolTipText(embedded ? "Move IRC into its own window" : "Put IRC inside RuneLite, below the game");
+        embedButton.setEnabled(available);
+        bottomDockButton.setVisible(!embedded);
+        if (embedded) shortcutHints.setVisible(false);
+        revalidate();
+        repaint();
     }
 
     /** The key tips along the bottom, wrapping between tips when the window is too narrow. */
