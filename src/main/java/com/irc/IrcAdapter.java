@@ -1,5 +1,7 @@
 package com.irc;
 
+import com.irc.scripting.ScriptContext;
+
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
@@ -21,6 +23,9 @@ public class IrcAdapter {
     private SimpleIrcClient client;
     private String currentNick;
     private volatile Consumer<IrcMessage> messageConsumer;
+    private volatile Consumer<ScriptContext> scriptConsumer;
+
+    void setScriptConsumer(Consumer<ScriptContext> consumer) { scriptConsumer = consumer; }
     private IrcConfig config;
     private volatile IrcPanel panel;
     /** Set by {@link #detach}; nothing reaches the UI afterwards. */
@@ -210,6 +215,7 @@ public class IrcAdapter {
      */
     public void clearPanel() {
         this.panel = null;
+        scriptConsumer = null;
     }
 
     /**
@@ -221,6 +227,7 @@ public class IrcAdapter {
         detached = true;
         panel = null;
         messageConsumer = null;
+        scriptConsumer = null;
     }
 
     /**
@@ -334,6 +341,11 @@ public class IrcAdapter {
                     break;
 
                 case MESSAGE:
+                    Consumer<ScriptContext> scripts = scriptConsumer;
+                    if (scripts != null && !source.equalsIgnoreCase(currentNick)
+                            && !isPlayback(serverTime(event.getAdditionalData()))) {
+                        scripts.accept(new ScriptContext(networkId, event.getTarget(), event.getSource(), currentNick, event.getMessage()));
+                    }
                     if (Objects.equals(target, source)) {
                         switch (config.filterPMs()) {
                             case Current:

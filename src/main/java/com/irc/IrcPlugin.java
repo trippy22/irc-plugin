@@ -1,5 +1,8 @@
 package com.irc;
 
+import com.irc.scripting.IrcScripts;
+import com.irc.scripting.ScriptContext;
+
 import com.google.gson.Gson;
 import com.google.inject.Provides;
 import com.irc.emoji.EmojiParser;
@@ -41,6 +44,7 @@ import java.util.regex.Pattern;
 
 @PluginDescriptor(
         name = "Global Chat (IRC)",
+        internalName = "global-chat-irc",
         description = "Integrates IRC with the OSRS chatbox"
 )
 @Slf4j
@@ -65,6 +69,8 @@ public class IrcPlugin extends Plugin {
     private NetworkManager networks;
     private NetworksDialog networksDialog;
     private IrcPanel panel;
+    private volatile IrcScripts scripts;
+    private java.util.concurrent.CompletableFuture<Void> scriptsStopped = java.util.concurrent.CompletableFuture.completedFuture(null);
     @Inject
     private EmojiService emojiService;
 
@@ -83,11 +89,12 @@ public class IrcPlugin extends Plugin {
         } else {
             SwingUtilities.invokeAndWait(this::setupPanel);
         }
-        updatePanelHost(false);
+        updatePanelHost(false, false);
         overlay = new IrcOverlay(client, panel, config, keyManager);
         overlayManager.add(overlay);
         emojiService.initialize();
         networks = new NetworkManager(new PluginConnector());
+        startScripts();
         SwingUtilities.invokeLater(() -> {
             if (panel == null) return;
             panel.setNetworkActions(new PanelNetworkActions());
@@ -110,6 +117,13 @@ public class IrcPlugin extends Plugin {
 
     @Override
     protected void shutDown() {
+        IrcScripts closingScripts = scripts;
+        scripts = null;
+        if (closingScripts != null) {
+            scriptsStopped = closingScripts.close().exceptionally(error -> {
+                log.debug("Unable to save IRC script draft", error); return null;
+            });
+        }
         // Cut the adapter's path to the UI first: a LIST reply already in flight would otherwise
         // re-open the channel browser onto a panel that is on its way out.
         if (networks != null) {
@@ -245,6 +259,8 @@ public class IrcPlugin extends Plugin {
                     ? seedNick() : sanitizeNick(network.getNick());
             IrcAdapter adapter = new IrcAdapter();
             adapter.initialize(config, network, IrcPlugin.this::processMessage, panel, nick);
+            IrcScripts currentScripts = scripts;
+            if (currentScripts != null) adapter.setScriptConsumer(currentScripts::text);
             adapter.connect();
             joinOnOpen(adapter, network);
             return adapter;
@@ -352,7 +368,7 @@ public class IrcPlugin extends Plugin {
 
     /** Commands that work without a live connection to the buffer's network. */
     private static final Set<String> OFFLINE_COMMANDS = new HashSet<>(Arrays.asList(
-            "go", "clear", "popout", "help", "networks", "c", "close", "leave", "part"));
+            "go", "clear", "popout", "help", "networks", "scripts", "script", "c", "close", "leave", "part"));
 
     private static String passwordKey(String networkId, String channel) {
         return networkId + "\u0000" + channel.toLowerCase();
@@ -448,6 +464,78 @@ public class IrcPlugin extends Plugin {
             }
             adapter.sendMessage(buffer.getName(), message);
         }
+    }
+
+    private void startScripts() {
+        IrcPanel owner = panel;
+        scripts = new IrcScripts(this::getPluginDirectory, new IrcScripts.Output() {
+            @Override public void echo(ScriptContext context, String text) {
+                scriptMessage(owner, context.network, text);
+            }
+
+            @Override public void send(ScriptContext context, String target, String text, boolean notice) {
+                if (panel != owner || scripts == null) return;
+                IrcAdapter adapter = adapterFor(context.network);
+                if (adapter == null || !adapter.isConnected()) throw new IllegalArgumentException("IRC network is disconnected");
+                // Deliberately bypass the plugin command dispatcher and all game chat APIs.
+                if (notice) adapter.getClient().sendNotice(target, text);
+                else adapter.getClient().sendMessage(target, text);
+                IrcMessage echo = new IrcMessage(target, adapter.getNick(),
+                        notice ? "[notice] " + text : text, IrcMessage.MessageType.PRIVATE, Instant.now()).withNetworkId(context.network);
+                SwingUtilities.invokeLater(() -> { if (panel == owner) owner.addMessage(echo); });
+            }
+        }, scriptsStopped);
+        scripts.ready().exceptionally(error -> {
+            scriptMessage(owner, NetworkConfig.SWIFTIRC_ID, "Scripts: " + IrcScripts.message(error)); return null;
+        });
+    }
+
+    /** Script diagnostics stay in the IRC UI; script code never gets access to RuneScape objects. */
+    private void scriptMessage(IrcPanel owner, String network, String text) {
+        IrcMessage message = new IrcMessage("System", "Scripts", text, IrcMessage.MessageType.SYSTEM, Instant.now()).withNetworkId(network);
+        SwingUtilities.invokeLater(() -> { if (panel == owner && owner != null) owner.addMessage(message); });
+    }
+
+    private void openScriptsDialog() {
+        if (panel == null || scripts == null) return;
+        scripts.open(panel.getChatContent());
+    }
+
+    private void scriptCommand(BufferKey buffer, String argument) {
+        IrcScripts manager = scripts;
+        IrcPanel owner = panel;
+        if (manager == null || owner == null) return;
+        String[] parts = argument.trim().split("\\s+", 2);
+        String action = parts[0].toLowerCase(Locale.ROOT), value = parts.length == 2 ? parts[1] : "";
+        if (action.isEmpty()) { SwingUtilities.invokeLater(this::openScriptsDialog); return; }
+        if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) value = value.substring(1, value.length() - 1);
+        java.util.concurrent.CompletableFuture<?> operation;
+        switch (action) {
+            case "list":
+                if (manager.list().isEmpty()) scriptMessage(owner, buffer.getNetworkId(), "No scripts registered. Use /scripts to add one.");
+                for (String line : manager.list()) scriptMessage(owner, buffer.getNetworkId(), line);
+                return;
+            case "load": operation = manager.load(value); break;
+            case "reload": operation = manager.reload(value); break;
+            case "enable": operation = manager.enable(value, true); break;
+            case "disable": operation = manager.enable(value, false); break;
+            case "remove": operation = manager.remove(value); break;
+            case "run": {
+                String[] call = value.split("\\s+", 2);
+                IrcAdapter adapter = adapterFor(buffer.getNetworkId());
+                String me = adapter == null ? "" : adapter.getNick();
+                ScriptContext context = new ScriptContext(buffer.getNetworkId(), buffer.getName(), me, me, "");
+                operation = manager.run(call[0], call.length == 2 ? call[1] : "", context).thenAccept(result -> {
+                    if (!result.isEmpty()) scriptMessage(owner, buffer.getNetworkId(), result);
+                });
+                break;
+            }
+            default:
+                scriptMessage(owner, buffer.getNetworkId(), "Use /script list, load|reload|enable|disable|remove <name>, or run <alias> [arguments]. Import external files with /scripts.");
+                return;
+        }
+        operation.whenComplete((ignored, error) -> scriptMessage(owner, buffer.getNetworkId(),
+                error == null ? "Script " + action + " completed." : "Scripts: " + IrcScripts.message(error)));
     }
 
     private void handleCommand(BufferKey buffer, String command) {
@@ -646,6 +734,14 @@ public class IrcPlugin extends Plugin {
                 SwingUtilities.invokeLater(() -> openNetworksDialog(null));
                 break;
 
+            case "scripts":
+                SwingUtilities.invokeLater(this::openScriptsDialog);
+                break;
+
+            case "script":
+                scriptCommand(buffer, arg);
+                break;
+
             case "help":
                 showCommandHelp(net);
                 break;
@@ -770,6 +866,8 @@ public class IrcPlugin extends Plugin {
                 "/mode [#channel] [+modes|-modes] - Modify channel modes",
                 "/msg <nick> <message> - Send private message",
                 "/networks - Add, edit or remove IRC networks",
+                "/scripts - Open the IRC script manager and editor",
+                "/script list|load|reload|enable|disable|remove|run - Manage IRC scripts",
                 "/notice <nick> <message> - Send notice",
                 "/topic [#channel] [topic] - View or set the channel topic",
                 "/umode [+modes|-modes] - Modify user modes",
@@ -978,12 +1076,12 @@ public class IrcPlugin extends Plugin {
         }
     }
 
-    private void updatePanelHost(boolean rebuildNavigation) {
+    private void updatePanelHost(boolean rebuildNavigation, boolean requestFocus) {
         SwingUtilities.invokeLater(() -> {
             if (panel == null) return;
             clientToolbar.removeNavigation(panel.getNavigationButton());
             if (rebuildNavigation) panel.generateNavigationButton();
-            panel.setDetached(config.popOut(), config.popOutAlwaysOnTop());
+            panel.setDetached(config.popOut(), config.popOutAlwaysOnTop(), requestFocus);
             if (config.sidePanel() && !config.popOut()) {
                 clientToolbar.addNavigation(panel.getNavigationButton());
             }
@@ -999,11 +1097,11 @@ public class IrcPlugin extends Plugin {
         if ("sidePanel".equals(configChanged.getKey())
                 || "popOut".equals(configChanged.getKey())
                 || "panelPriority".equals(configChanged.getKey())) {
-            updatePanelHost("panelPriority".equals(configChanged.getKey()));
+            updatePanelHost("panelPriority".equals(configChanged.getKey()), "popOut".equals(configChanged.getKey()));
         } else if ("popOutAlwaysOnTop".equals(configChanged.getKey())) {
             SwingUtilities.invokeLater(() -> {
                 if (panel != null) {
-                    panel.setDetached(config.popOut(), config.popOutAlwaysOnTop());
+                    panel.setDetached(config.popOut(), config.popOutAlwaysOnTop(), false);
                 }
             });
         } else if ("fontSize".equals(configChanged.getKey())) {

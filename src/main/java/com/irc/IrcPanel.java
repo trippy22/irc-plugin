@@ -222,6 +222,9 @@ public class IrcPanel extends PluginPanel {
         JButton removeButton = new JButton("-");
         JButton reloadButton = new JButton();
         JButton popOutButton = new JButton("^");
+        JButton scriptsButton = new JButton("S");
+        scriptsButton.setToolTipText("Manage IRC scripts");
+        scriptsButton.addActionListener(e -> { if (onMessageSend != null) onMessageSend.accept(getCurrentBuffer(), "/scripts"); });
         popOutButton.setToolTipText("Pop out window");
         try {
             Image img = ImageUtil.loadImageResource(getClass(), "reload.png");
@@ -234,6 +237,7 @@ public class IrcPanel extends PluginPanel {
         removeButton.setPreferredSize(standard);
         reloadButton.setPreferredSize(standard);
         popOutButton.setPreferredSize(standard);
+        scriptsButton.setPreferredSize(standard);
         final JComboBox<String> fontComboBox = getFontComboBox();
 
 
@@ -247,6 +251,7 @@ public class IrcPanel extends PluginPanel {
         row1Buttons.add(addButton);
         row1Buttons.add(removeButton);
         row1Buttons.add(popOutButton);
+        row1Buttons.add(scriptsButton);
         fontComboBox.setMinimumSize(new Dimension(0, fontComboBox.getPreferredSize().height));
         GridBagConstraints fontFill = new GridBagConstraints();
         fontFill.fill = GridBagConstraints.HORIZONTAL;
@@ -845,6 +850,10 @@ public class IrcPanel extends PluginPanel {
     }
 
     public void setDetached(boolean detached, boolean alwaysOnTop) {
+        setDetached(detached, alwaysOnTop, true);
+    }
+
+    public void setDetached(boolean detached, boolean alwaysOnTop, boolean requestFocus) {
         if (detachedLayout != detached) {
             if (detached) {
                 if (desktopLayout == null) {
@@ -890,13 +899,13 @@ public class IrcPanel extends PluginPanel {
             chatContent.revalidate();
             chatContent.repaint();
         }
-        panelWindow.setDetached(detached, alwaysOnTop);
+        panelWindow.setDetached(detached, alwaysOnTop, requestFocus);
     }
 
     private void refreshDesktopChannels() {
         if (desktopLayout == null) return;
         desktopLayout.updateChannels(networkNodes(), getCurrentBuffer());
-        desktopLayout.showTopic(channelTopics.getOrDefault(getCurrentBuffer().folded(), ""));
+        desktopLayout.showTopic(getCurrentBuffer(), channelTopics.getOrDefault(getCurrentBuffer().folded(), ""));
     }
 
     /** Networks in the user's order (announcement order until reordered), each with its buffers in tab order. */
@@ -974,13 +983,10 @@ public class IrcPanel extends PluginPanel {
             bufferDropdown.addItem(titleOf(channel));
         }
 
-        JScrollPane scrollPane = new JScrollPane(pane);
-        scrollPane.getVerticalScrollBar().addAdjustmentListener(e -> pane.cancelPreviewManager());
-
         if (index < 0) {
             channelPanes.put(channel, pane);
             unreadMessages.put(channel, false);
-            tabbedPane.addTab(titleOf(channel), new JScrollPane(pane));
+            tabbedPane.addTab(titleOf(channel), channelScrollPane(pane));
             index = tabbedPane.getTabCount() - 1;
         } else {
             insertBuffer(channel, pane, index);
@@ -1029,11 +1035,18 @@ public class IrcPanel extends PluginPanel {
             unreadMessages.put(channel, false);
             reorderKeys(unreadMessages, order);
             withoutDropdownListeners(() -> bufferDropdown.insertItemAt(titleOf(channel), index));
-            tabbedPane.insertTab(titleOf(channel), null, new JScrollPane(pane), null, index);
+            tabbedPane.insertTab(titleOf(channel), null, channelScrollPane(pane), null, index);
             reselect(selected);
         } finally {
             reordering = false;
         }
+    }
+
+    private static JScrollPane channelScrollPane(ChannelPane pane) {
+        JScrollPane scroll = new JScrollPane(pane);
+        scroll.getVerticalScrollBar().addAdjustmentListener(e -> pane.cancelPreviewManager());
+        scroll.getHorizontalScrollBar().addAdjustmentListener(e -> pane.cancelPreviewManager());
+        return scroll;
     }
 
     /**

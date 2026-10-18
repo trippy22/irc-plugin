@@ -45,6 +45,7 @@ public class IrcPanelWindowTest {
                     host.setDetached(true, false);
                     JFrame frame = (JFrame) SwingUtilities.getWindowAncestor(content);
                     assertTrue(frame.isVisible());
+                    assertTrue("explicit popout allows focus when shown", frame.isAutoRequestFocus());
                     assertEquals(0, dock.getComponentCount());
                     frame.setSize(620, 680);
                     frame.validate();
@@ -141,8 +142,19 @@ public class IrcPanelWindowTest {
             IrcPanelWindow host = new IrcPanelWindow(dock, content, () -> {}, () -> {}, () -> {},
                     config::get, config::set);
             try {
-                host.setDetached(true, false);
-                assertEquals(savedBounds, SwingUtilities.getWindowAncestor(content).getBounds());
+                host.setDetached(true, false, false);
+                JFrame restored = (JFrame) SwingUtilities.getWindowAncestor(content);
+                assertEquals(savedBounds, restored.getBounds());
+                assertTrue("startup still restores the popout", restored.isVisible());
+                assertFalse("startup must not activate the restored window", restored.isAutoRequestFocus());
+                assertTrue("the restored window remains usable when clicked", restored.isFocusableWindow());
+                host.setDetached(true, true, false);
+                assertTrue(restored.isAlwaysOnTop());
+                assertFalse("changing always-on-top does not enable automatic focus", restored.isAutoRequestFocus());
+                host.setDetached(false, false, false);
+                host.setDetached(true, false, true);
+                assertTrue("an explicit reopen may activate the new window",
+                        SwingUtilities.getWindowAncestor(content).isAutoRequestFocus());
             } finally {
                 host.shutdown();
             }

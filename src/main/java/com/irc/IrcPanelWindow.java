@@ -100,6 +100,11 @@ final class IrcPanelWindow {
     }
 
     void setDetached(boolean detached, boolean alwaysOnTop) {
+        setDetached(detached, alwaysOnTop, true);
+    }
+
+    /** Startup restores the saved window without activating it; a user popout action may activate it. */
+    void setDetached(boolean detached, boolean alwaysOnTop, boolean requestFocus) {
         assert SwingUtilities.isEventDispatchThread();
         if (detached) {
             if (frame == null) {
@@ -129,7 +134,16 @@ final class IrcPanelWindow {
                 dockHost.revalidate();
                 dockHost.repaint();
                 frame.setAlwaysOnTop(alwaysOnTop);
+                frame.setAutoRequestFocus(requestFocus);
                 frame.setVisible(true);
+                // Removing the sidebar/navigation can queue a focus change back to RuneLite.
+                // Raise the new window after that work has completed, not only during show().
+                if (requestFocus) {
+                    JFrame opened = frame;
+                    SwingUtilities.invokeLater(() -> {
+                        if (frame == opened && opened.isShowing()) toFront();
+                    });
+                }
             } else {
                 frame.setAlwaysOnTop(alwaysOnTop);
             }

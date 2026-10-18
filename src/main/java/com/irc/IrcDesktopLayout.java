@@ -105,6 +105,8 @@ final class IrcDesktopLayout extends JPanel {
     /** Holds the topic at its full width; a long one scrolls sideways instead of being cut off. */
     private final JScrollPane topicScroll = new JScrollPane(topic,
             ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER, ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+    private BufferKey topicBuffer;
+    private String topicText;
     private final JPanel conversation = new JPanel(new BorderLayout());
     private final JPanel composer = new JPanel(new BorderLayout());
     private final Consumer<String> query;
@@ -558,6 +560,14 @@ final class IrcDesktopLayout extends JPanel {
 
     /** Shows the selected channel's topic beside its name; "" hides it. */
     void showTopic(String text) {
+        showTopic(null, text);
+    }
+
+    void showTopic(BufferKey buffer, String text) {
+        // Message/unread/roster refreshes must not rebuild the HTML view or reset a user's drag.
+        if (java.util.Objects.equals(topicBuffer, buffer) && text.equals(topicText)) return;
+        topicBuffer = buffer;
+        topicText = text;
         String html = topicHtml(text);
         topic.putClientProperty("html.disable", html == null ? Boolean.TRUE : null);
         topic.setText(html != null ? html : text.isEmpty() ? "" : "—  " + text);

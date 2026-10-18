@@ -315,6 +315,16 @@ public class IrcDesktopLayoutTest {
                         java.awt.event.MouseWheelEvent.WHEEL_UNIT_SCROLL, 3, 2));
                 assertTrue("the wheel scrolls the topic sideways", viewport.getViewPosition().x > 0);
 
+                Point position = viewport.getViewPosition();
+                Object htmlView = topic.getClientProperty(javax.swing.plaf.basic.BasicHTML.propertyKey);
+                layout.showTopic(topic.getToolTipText());
+                assertEquals("an unchanged topic refresh preserves horizontal scrolling", position, viewport.getViewPosition());
+                assertSame("an unchanged topic does not rebuild its HTML view", htmlView,
+                        topic.getClientProperty(javax.swing.plaf.basic.BasicHTML.propertyKey));
+
+                layout.showTopic(BufferKey.swiftIrc("#other"), topic.getToolTipText());
+                assertEquals("switching conversations resets even an identical topic", 0, viewport.getViewPosition().x);
+
                 layout.showTopic("Short");
                 scroll.validate();
                 assertEquals("a new topic starts at the left", 0, viewport.getViewPosition().x);

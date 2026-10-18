@@ -92,6 +92,20 @@ Disconnect from the selected channel's network: `;;quit [message]`
 
 ## Configuration
 
+### IRC scripts
+
+Use the **S** button in the IRC toolbar or `/scripts` to open the script manager in either
+the sidebar or popout. It includes an editor, enable checkboxes, managed file imports,
+save/reload controls, and persistent script settings. New and imported scripts start disabled.
+Replies and private-message access each require separate permission. Replies stay within the
+originating conversation and have fixed shared rate limits, duplicate suppression, and automatic
+disablement after repeated violations.
+
+The interpreter supports a bounded, IRC-only subset inspired by mIRC scripting, implemented
+in Java without additional dependencies. It does not execute Java or expose game actions.
+See [IRC scripting](SCRIPTS.md) for the supported syntax, commands, storage behavior, limits,
+and Plugin Hub review considerations.
+
 ### Connection
 
 These settings are for SwiftIRC. Other networks are set up in the Networks dialog (see
